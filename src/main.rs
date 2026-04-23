@@ -1,68 +1,127 @@
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
-use ratatui::{
-    DefaultTerminal, Frame,
-    buffer::Buffer,
-    layout::Rect,
-    style::Stylize,
-    symbols::border,
-    text::Line,
-    widgets::{Block, Widget},
-};
+use std::path::Path;
+
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+
+use hosttui::app::{App, Mode, Pane};
+use hosttui::model::Config;
+use hosttui::ssh;
+use hosttui::sshconfig;
+use hosttui::storage;
+use hosttui::ui;
+
+fn persist(path: &Path, config: &Config) -> anyhow::Result<()> {
+    storage::save(path, config)?;
+    let ssh_path = sshconfig::ssh_config_path()?;
+    sshconfig::export(&ssh_path, config)?;
+    Ok(())
+}
 
 fn main() -> anyhow::Result<()> {
-    ratatui::run(|terminal| App::default().run(terminal))
-}
+    let path = storage::config_path()?;
+    let config = storage::load(&path)?;
+    let mut app = App::new(config);
 
-#[derive(Debug, Default)]
-pub struct App {
-    exit: bool,
-}
+    ratatui::run(|terminal| {
+        while !app.exit {
+            terminal.draw(|frame| ui::render(frame, &app))?;
 
-impl App {
-    /// runs the application's main loop until the user quits
-    pub fn run(&mut self, terminal: &mut DefaultTerminal) -> anyhow::Result<()> {
-        while !self.exit {
-            terminal.draw(|frame| self.draw(frame))?;
-            self.handle_events()?;
-        }
-        Ok(())
-    }
+            if let Event::Key(key) = event::read()? {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
 
-    fn draw(&self, frame: &mut Frame) {
-        frame.render_widget(self, frame.area());
-    }
-
-    fn handle_events(&mut self) -> anyhow::Result<()> {
-        match event::read()? {
-            Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
-                self.handle_key_event(key_event)
+                match &app.mode {
+                    Mode::Normal => match key.code {
+                        KeyCode::Char('q') | KeyCode::Esc => app.exit = true,
+                        KeyCode::Char('j') | KeyCode::Down => app.move_down(),
+                        KeyCode::Char('k') | KeyCode::Up => app.move_up(),
+                        KeyCode::Tab => app.toggle_focus(),
+                        KeyCode::Enter if app.focus == Pane::Hosts => {
+                            if let Some(host) = app.selected_host().cloned() {
+                                ssh::connect(&host)?;
+                                terminal.clear()?;
+                            }
+                        }
+                        KeyCode::Char('a') if app.focus == Pane::Hosts => app.start_adding(),
+                        KeyCode::Char('e') if app.focus == Pane::Hosts => app.start_editing(),
+                        KeyCode::Char('d') => app.start_delete(),
+                        KeyCode::Char('g') if app.focus == Pane::Groups => {
+                            app.start_adding_group();
+                        }
+                        _ => {}
+                    },
+                    Mode::Adding(_) | Mode::Editing { .. } => match key.code {
+                        KeyCode::Esc => app.cancel_mode(),
+                        KeyCode::Enter => {
+                            app.submit_form();
+                            if matches!(app.mode, Mode::Normal) && app.dirty {
+                                persist(&path, &app.config)?;
+                                app.dirty = false;
+                            }
+                        }
+                        KeyCode::Tab => {
+                            if let Some(form) = app.form_state_mut() {
+                                form.next_field();
+                            }
+                        }
+                        KeyCode::BackTab => {
+                            if let Some(form) = app.form_state_mut() {
+                                form.prev_field();
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            if let Some(form) = app.form_state_mut() {
+                                form.active_buffer().pop();
+                            }
+                        }
+                        KeyCode::Char(c) => {
+                            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                continue;
+                            }
+                            if let Some(form) = app.form_state_mut() {
+                                form.error = None;
+                                form.active_buffer().push(c);
+                            }
+                        }
+                        _ => {}
+                    },
+                    Mode::AddingGroup(_) => match key.code {
+                        KeyCode::Esc => app.cancel_mode(),
+                        KeyCode::Enter => {
+                            app.submit_form();
+                            if matches!(app.mode, Mode::Normal) && app.dirty {
+                                persist(&path, &app.config)?;
+                                app.dirty = false;
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            if let Some(input) = app.input_state_mut() {
+                                input.buffer.pop();
+                            }
+                        }
+                        KeyCode::Char(c) => {
+                            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                continue;
+                            }
+                            if let Some(input) = app.input_state_mut() {
+                                input.error = None;
+                                input.buffer.push(c);
+                            }
+                        }
+                        _ => {}
+                    },
+                    Mode::ConfirmDelete(_) | Mode::ConfirmDeleteGroup(_) => match key.code {
+                        KeyCode::Char('y') => {
+                            app.confirm_delete();
+                            persist(&path, &app.config)?;
+                            app.dirty = false;
+                        }
+                        KeyCode::Char('n') | KeyCode::Esc => app.cancel_mode(),
+                        _ => {}
+                    },
+                }
             }
-            _ => {}
         }
-
         Ok(())
-    }
-
-    fn handle_key_event(&mut self, key_event: KeyEvent) {
-        match key_event.code {
-            KeyCode::Char('q') | KeyCode::Esc => self.exit(),
-            _ => {}
-        }
-    }
-
-    fn exit(&mut self) {
-        self.exit = true;
-    }
-}
-
-impl Widget for &App {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        let title = Line::from(" confitui ".bold());
-        let instructions = Line::from(vec![" Quit ".into(), "<Q> or <ESC>".blue().bold()]);
-        Block::bordered()
-            .title(title.centered())
-            .title_bottom(instructions.centered())
-            .border_set(border::THICK)
-            .render(area, buf);
-    }
+    })
 }
