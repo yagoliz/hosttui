@@ -1,6 +1,6 @@
 use ratatui::{
     Frame,
-    layout::{Constraint, Flex, Layout, Rect},
+    layout::{Constraint, Flex, Layout, Position, Rect},
     style::{Color, Modifier, Style, Stylize},
     symbols::border,
     text::{Line, Span},
@@ -10,7 +10,7 @@ use ratatui::{
 use crate::app::{self, App, FormState, GroupEntry, InputState, Mode, Pane};
 
 pub fn render(frame: &mut Frame, app: &App) {
-    let show_search_bar = matches!(app.mode, Mode::Searching) || !app.search.is_empty();
+    let show_search_bar = matches!(app.mode, Mode::Searching) || !app.search.value().is_empty();
     let [main_area, search_area] = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(if show_search_bar { 1 } else { 0 }),
@@ -244,7 +244,8 @@ fn render_form(frame: &mut Frame, title: &str, form: &FormState) {
 
     let rows = Layout::vertical(constraints).split(inner);
 
-    for (i, (field, value)) in form.fields.iter().enumerate() {
+    let label_width = 17; // "{:>15}: " renders to 17 columns
+    for (i, (field, input)) in form.fields.iter().enumerate() {
         let is_active = i == form.active;
         let label_style = if is_active {
             Style::default()
@@ -259,17 +260,19 @@ fn render_form(frame: &mut Frame, title: &str, form: &FormState) {
             Style::default().fg(Color::DarkGray)
         };
 
-        let display_value = if is_active {
-            format!("{value}_")
-        } else {
-            value.clone()
-        };
-
         let line = Line::from(vec![
             Span::styled(format!("{:>15}: ", field.label()), label_style),
-            Span::styled(display_value, value_style),
+            Span::styled(input.value().to_string(), value_style),
         ]);
         frame.render_widget(Paragraph::new(line), rows[i]);
+
+        if is_active {
+            let row = rows[i];
+            let cursor_x = row.x + label_width + input.visual_cursor() as u16;
+            if cursor_x < row.x + row.width {
+                frame.set_cursor_position(Position::new(cursor_x, row.y));
+            }
+        }
     }
 
     if let Some(ref err) = form.error {
@@ -301,7 +304,7 @@ fn render_group_input(frame: &mut Frame, title: &str, input: &InputState) {
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(format!("{}_", input.buffer)),
+        Span::raw(input.buffer.value().to_string()),
     ])];
 
     if let Some(ref err) = input.error {
@@ -313,6 +316,11 @@ fn render_group_input(frame: &mut Frame, title: &str, input: &InputState) {
     }
 
     frame.render_widget(Paragraph::new(lines), inner);
+
+    let cursor_x = inner.x + 6 + input.buffer.visual_cursor() as u16;
+    if cursor_x < inner.x + inner.width {
+        frame.set_cursor_position(Position::new(cursor_x, inner.y));
+    }
 }
 
 fn render_search_bar(frame: &mut Frame, app: &App, area: Rect) {
@@ -324,13 +332,9 @@ fn render_search_bar(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         Style::default().fg(Color::DarkGray)
     };
-    let buffer = if active {
-        format!("{}_", app.search)
-    } else {
-        app.search.clone()
-    };
+    let value = app.search.value();
     let hint = if active {
-        if app.search.is_empty() {
+        if value.is_empty() {
             "  (Enter to keep, Esc to clear)"
         } else {
             ""
@@ -340,10 +344,17 @@ fn render_search_bar(frame: &mut Frame, app: &App, area: Rect) {
     };
     let line = Line::from(vec![
         Span::styled("/ ", prompt_style),
-        Span::styled(buffer, Style::default().fg(Color::White)),
+        Span::styled(value.to_string(), Style::default().fg(Color::White)),
         Span::styled(hint, Style::default().fg(Color::DarkGray)),
     ]);
     frame.render_widget(Paragraph::new(line), area);
+
+    if active {
+        let cursor_x = area.x + 2 + app.search.visual_cursor() as u16;
+        if cursor_x < area.x + area.width {
+            frame.set_cursor_position(Position::new(cursor_x, area.y));
+        }
+    }
 }
 
 fn render_confirm(frame: &mut Frame, title: &str, message: &str) {

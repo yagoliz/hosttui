@@ -17,6 +17,7 @@ ratatui = "0.30.0"
 serde = { version = "1.0.228", features = ["derive"] }
 thiserror = "2.0.18"
 toml = "1.1.2"
+tui-input = "0.15.3"
 
 [dev-dependencies]
 tempfile = "3.27.0"

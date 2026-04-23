@@ -1,5 +1,6 @@
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config as MatcherConfig, Matcher, Utf32Str};
+use tui_input::Input;
 
 use crate::model::{Config, Host};
 
@@ -34,7 +35,7 @@ impl Field {
 
 #[derive(Debug, Clone)]
 pub struct FormState {
-    pub fields: [(Field, String); 6],
+    pub fields: [(Field, Input); 6],
     pub active: usize,
     pub error: Option<String>,
 }
@@ -43,12 +44,27 @@ impl FormState {
     fn blank() -> Self {
         FormState {
             fields: [
-                (Field::Alias, String::new()),
-                (Field::Hostname, String::new()),
-                (Field::User, String::new()),
-                (Field::Port, "22".into()),
-                (Field::IdentityFile, String::new()),
-                (Field::Group, String::new()),
+                (Field::Alias, Input::default()),
+                (Field::Hostname, Input::default()),
+                (Field::User, Input::default()),
+                (Field::Port, Input::new("22".into())),
+                (Field::IdentityFile, Input::default()),
+                (Field::Group, Input::default()),
+            ],
+            active: 0,
+            error: None,
+        }
+    }
+
+    fn with_group(group: &str) -> Self {
+        FormState {
+            fields: [
+                (Field::Alias, Input::default()),
+                (Field::Hostname, Input::default()),
+                (Field::User, Input::default()),
+                (Field::Port, Input::new("22".into())),
+                (Field::IdentityFile, Input::default()),
+                (Field::Group, Input::new(group.into())),
             ],
             active: 0,
             error: None,
@@ -58,22 +74,25 @@ impl FormState {
     fn from_host(host: &Host) -> Self {
         FormState {
             fields: [
-                (Field::Alias, host.alias.clone()),
-                (Field::Hostname, host.hostname.clone()),
-                (Field::User, host.user.clone()),
-                (Field::Port, host.port.to_string()),
+                (Field::Alias, Input::new(host.alias.clone())),
+                (Field::Hostname, Input::new(host.hostname.clone())),
+                (Field::User, Input::new(host.user.clone())),
+                (Field::Port, Input::new(host.port.to_string())),
                 (
                     Field::IdentityFile,
-                    host.identity_file.clone().unwrap_or_default(),
+                    Input::new(host.identity_file.clone().unwrap_or_default()),
                 ),
-                (Field::Group, host.group.clone().unwrap_or_default()),
+                (
+                    Field::Group,
+                    Input::new(host.group.clone().unwrap_or_default()),
+                ),
             ],
             active: 0,
             error: None,
         }
     }
 
-    pub fn active_buffer(&mut self) -> &mut String {
+    pub fn active_input(&mut self) -> &mut Input {
         &mut self.fields[self.active].1
     }
 
@@ -86,7 +105,12 @@ impl FormState {
     }
 
     fn value(&self, field: Field) -> &str {
-        &self.fields.iter().find(|(f, _)| *f == field).unwrap().1
+        self.fields
+            .iter()
+            .find(|(f, _)| *f == field)
+            .unwrap()
+            .1
+            .value()
     }
 
     fn to_host(&self) -> Result<Host, String> {
@@ -133,9 +157,9 @@ impl FormState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct InputState {
-    pub buffer: String,
+    pub buffer: Input,
     pub error: Option<String>,
 }
 
@@ -174,7 +198,7 @@ pub struct App {
     pub dirty: bool,
     pub focus: Pane,
     pub group_selected: usize,
-    pub search: String,
+    pub search: Input,
     group_entries: Vec<GroupEntry>,
     items: Vec<ListItem>,
 }
@@ -197,7 +221,7 @@ impl App {
             dirty: false,
             focus: Pane::Hosts,
             group_selected: 0,
-            search: String::new(),
+            search: Input::default(),
             group_entries,
             items,
         }
@@ -293,7 +317,7 @@ impl App {
             &self.config,
             &self.group_entries,
             self.group_selected,
-            &self.search,
+            self.search.value(),
         );
         if self.selected >= self.items.len() {
             self.selected = Self::first_host_index(&self.items);
@@ -344,7 +368,7 @@ impl App {
                         &self.config,
                         &self.group_entries,
                         self.group_selected,
-                        &self.search,
+                        self.search.value(),
                     );
                     self.selected = Self::first_host_index(&self.items);
                 }
@@ -377,7 +401,7 @@ impl App {
                         &self.config,
                         &self.group_entries,
                         self.group_selected,
-                        &self.search,
+                        self.search.value(),
                     );
                     self.selected = Self::first_host_index(&self.items);
                 }
@@ -386,7 +410,13 @@ impl App {
     }
 
     pub fn start_adding(&mut self) {
-        self.mode = Mode::Adding(FormState::blank());
+        let group = &self.group_entries[self.group_selected];
+        match group {
+            GroupEntry::All | GroupEntry::Ungrouped => self.mode = Mode::Adding(FormState::blank()),
+            GroupEntry::Named(group_name) => {
+                self.mode = Mode::Adding(FormState::with_group(&group_name))
+            }
+        }
     }
 
     pub fn start_editing(&mut self) {
@@ -414,10 +444,7 @@ impl App {
     }
 
     pub fn start_adding_group(&mut self) {
-        self.mode = Mode::AddingGroup(InputState {
-            buffer: String::new(),
-            error: None,
-        });
+        self.mode = Mode::AddingGroup(InputState::default());
     }
 
     pub fn start_editing_group(&mut self) {
@@ -425,7 +452,7 @@ impl App {
             self.mode = Mode::EditingGroup {
                 original_name: name.clone(),
                 input: InputState {
-                    buffer: name.clone(),
+                    buffer: Input::new(name.clone()),
                     error: None,
                 },
             };
@@ -506,7 +533,7 @@ impl App {
                 }
             },
             Mode::AddingGroup(mut input) => {
-                let name = input.buffer.trim().to_string();
+                let name = input.buffer.value().trim().to_string();
                 if name.is_empty() {
                     input.error = Some("Group name cannot be empty".into());
                     self.mode = Mode::AddingGroup(input);
@@ -526,7 +553,7 @@ impl App {
                 original_name,
                 mut input,
             } => {
-                let new_name = input.buffer.trim().to_string();
+                let new_name = input.buffer.value().trim().to_string();
                 if new_name.is_empty() {
                     input.error = Some("Group name cannot be empty".into());
                     self.mode = Mode::EditingGroup {
@@ -568,20 +595,13 @@ impl App {
 
     pub fn cancel_search(&mut self) {
         // Drop the filter entirely and return to the normal view.
-        self.search.clear();
+        self.search.reset();
         self.mode = Mode::Normal;
         self.rebuild();
         self.selected = Self::first_host_index(&self.items);
     }
 
-    pub fn push_search_char(&mut self, c: char) {
-        self.search.push(c);
-        self.rebuild();
-        self.selected = Self::first_host_index(&self.items);
-    }
-
-    pub fn pop_search_char(&mut self) {
-        self.search.pop();
+    pub fn refresh_search(&mut self) {
         self.rebuild();
         self.selected = Self::first_host_index(&self.items);
     }

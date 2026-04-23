@@ -1,6 +1,7 @@
 use std::path::Path;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use tui_input::backend::crossterm::EventHandler;
 
 use hosttui::app::{App, Mode, Pane};
 use hosttui::model::Config;
@@ -25,7 +26,8 @@ fn main() -> anyhow::Result<()> {
         while !app.exit {
             terminal.draw(|frame| ui::render(frame, &app))?;
 
-            if let Event::Key(key) = event::read()? {
+            let ev = event::read()?;
+            if let Event::Key(key) = ev {
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
@@ -59,14 +61,11 @@ fn main() -> anyhow::Result<()> {
                         KeyCode::Enter => app.commit_search(),
                         KeyCode::Down => app.move_down(),
                         KeyCode::Up => app.move_up(),
-                        KeyCode::Backspace => app.pop_search_char(),
-                        KeyCode::Char(c) => {
-                            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                                continue;
+                        _ => {
+                            if app.search.handle_event(&ev).is_some() {
+                                app.refresh_search();
                             }
-                            app.push_search_char(c);
                         }
-                        _ => {}
                     },
                     Mode::Adding(_) | Mode::Editing { .. } => match key.code {
                         KeyCode::Esc => app.cancel_mode(),
@@ -87,21 +86,13 @@ fn main() -> anyhow::Result<()> {
                                 form.prev_field();
                             }
                         }
-                        KeyCode::Backspace => {
-                            if let Some(form) = app.form_state_mut() {
-                                form.active_buffer().pop();
-                            }
-                        }
-                        KeyCode::Char(c) => {
-                            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                                continue;
-                            }
-                            if let Some(form) = app.form_state_mut() {
+                        _ => {
+                            if let Some(form) = app.form_state_mut()
+                                && form.active_input().handle_event(&ev).is_some()
+                            {
                                 form.error = None;
-                                form.active_buffer().push(c);
                             }
                         }
-                        _ => {}
                     },
                     Mode::AddingGroup(_) | Mode::EditingGroup { .. } => match key.code {
                         KeyCode::Esc => app.cancel_mode(),
@@ -112,21 +103,13 @@ fn main() -> anyhow::Result<()> {
                                 app.dirty = false;
                             }
                         }
-                        KeyCode::Backspace => {
-                            if let Some(input) = app.input_state_mut() {
-                                input.buffer.pop();
-                            }
-                        }
-                        KeyCode::Char(c) => {
-                            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                                continue;
-                            }
-                            if let Some(input) = app.input_state_mut() {
+                        _ => {
+                            if let Some(input) = app.input_state_mut()
+                                && input.buffer.handle_event(&ev).is_some()
+                            {
                                 input.error = None;
-                                input.buffer.push(c);
                             }
                         }
-                        _ => {}
                     },
                     Mode::ConfirmDelete(_) | Mode::ConfirmDeleteGroup(_) => match key.code {
                         KeyCode::Char('y') => {
