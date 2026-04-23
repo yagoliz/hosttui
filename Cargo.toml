@@ -1,10 +1,10 @@
 [package]
 name = "hosttui"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "A TUI to manage SSH configuration: browse hosts, organize them in groups, and connect"
 license = "MIT"
-repository = "https://github.com/yagoliz/confitui"
+repository = "https://github.com/yagoliz/hosttui"
 keywords = ["ssh", "tui", "terminal", "config"]
 categories = ["command-line-utilities"]
 
