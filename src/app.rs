@@ -59,7 +59,10 @@ impl FormState {
                 (Field::Hostname, host.hostname.clone()),
                 (Field::User, host.user.clone()),
                 (Field::Port, host.port.to_string()),
-                (Field::IdentityFile, host.identity_file.clone().unwrap_or_default()),
+                (
+                    Field::IdentityFile,
+                    host.identity_file.clone().unwrap_or_default(),
+                ),
                 (Field::Group, host.group.clone().unwrap_or_default()),
             ],
             active: 0,
@@ -133,20 +136,18 @@ pub struct InputState {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum Mode {
+    #[default]
     Normal,
     Adding(FormState),
-    Editing { original_alias: String, form: FormState },
+    Editing {
+        original_alias: String,
+        form: FormState,
+    },
     ConfirmDelete(String),
     AddingGroup(InputState),
     ConfirmDeleteGroup(String),
-}
-
-impl Default for Mode {
-    fn default() -> Self {
-        Mode::Normal
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -203,7 +204,11 @@ impl App {
         entries
     }
 
-    fn build_items(config: &Config, group_entries: &[GroupEntry], group_selected: usize) -> Vec<ListItem> {
+    fn build_items(
+        config: &Config,
+        group_entries: &[GroupEntry],
+        group_selected: usize,
+    ) -> Vec<ListItem> {
         let filter = group_entries.get(group_selected);
         let mut items = Vec::new();
 
@@ -296,7 +301,8 @@ impl App {
             Pane::Groups => {
                 if !self.group_entries.is_empty() {
                     self.group_selected = (self.group_selected + 1) % self.group_entries.len();
-                    self.items = Self::build_items(&self.config, &self.group_entries, self.group_selected);
+                    self.items =
+                        Self::build_items(&self.config, &self.group_entries, self.group_selected);
                     self.selected = Self::first_host_index(&self.items);
                 }
             }
@@ -324,7 +330,8 @@ impl App {
                         .group_selected
                         .checked_sub(1)
                         .unwrap_or(self.group_entries.len() - 1);
-                    self.items = Self::build_items(&self.config, &self.group_entries, self.group_selected);
+                    self.items =
+                        Self::build_items(&self.config, &self.group_entries, self.group_selected);
                     self.selected = Self::first_host_index(&self.items);
                 }
             }
@@ -394,48 +401,51 @@ impl App {
     pub fn submit_form(&mut self) {
         let mode = self.mode.clone();
         match mode {
-            Mode::Adding(mut form) => {
-                match form.to_host() {
-                    Ok(host) => {
-                        if self.config.find(&host.alias).is_some() {
-                            form.error = Some(format!("Alias '{}' already exists", host.alias));
-                            self.mode = Mode::Adding(form);
-                            return;
-                        }
-                        self.ensure_host_group_exists(&host);
-                        self.config.add_host(host);
-                        self.rebuild();
-                        self.dirty = true;
-                        self.mode = Mode::Normal;
-                    }
-                    Err(e) => {
-                        form.error = Some(e);
+            Mode::Adding(mut form) => match form.to_host() {
+                Ok(host) => {
+                    if self.config.find(&host.alias).is_some() {
+                        form.error = Some(format!("Alias '{}' already exists", host.alias));
                         self.mode = Mode::Adding(form);
+                        return;
                     }
+                    self.ensure_host_group_exists(&host);
+                    self.config.add_host(host);
+                    self.rebuild();
+                    self.dirty = true;
+                    self.mode = Mode::Normal;
                 }
-            }
-            Mode::Editing { original_alias, mut form } => {
-                match form.to_host() {
-                    Ok(host) => {
-                        if host.alias != original_alias
-                            && self.config.find(&host.alias).is_some()
-                        {
-                            form.error = Some(format!("Alias '{}' already exists", host.alias));
-                            self.mode = Mode::Editing { original_alias, form };
-                            return;
-                        }
-                        self.ensure_host_group_exists(&host);
-                        self.config.update_host(&original_alias, host);
-                        self.rebuild();
-                        self.dirty = true;
-                        self.mode = Mode::Normal;
-                    }
-                    Err(e) => {
-                        form.error = Some(e);
-                        self.mode = Mode::Editing { original_alias, form };
-                    }
+                Err(e) => {
+                    form.error = Some(e);
+                    self.mode = Mode::Adding(form);
                 }
-            }
+            },
+            Mode::Editing {
+                original_alias,
+                mut form,
+            } => match form.to_host() {
+                Ok(host) => {
+                    if host.alias != original_alias && self.config.find(&host.alias).is_some() {
+                        form.error = Some(format!("Alias '{}' already exists", host.alias));
+                        self.mode = Mode::Editing {
+                            original_alias,
+                            form,
+                        };
+                        return;
+                    }
+                    self.ensure_host_group_exists(&host);
+                    self.config.update_host(&original_alias, host);
+                    self.rebuild();
+                    self.dirty = true;
+                    self.mode = Mode::Normal;
+                }
+                Err(e) => {
+                    form.error = Some(e);
+                    self.mode = Mode::Editing {
+                        original_alias,
+                        form,
+                    };
+                }
+            },
             Mode::AddingGroup(mut input) => {
                 let name = input.buffer.trim().to_string();
                 if name.is_empty() {
