@@ -34,7 +34,14 @@ fn main() -> anyhow::Result<()> {
 
                 match &app.mode {
                     Mode::Normal => match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => app.exit = true,
+                        KeyCode::Char('q') => app.exit = true,
+                        KeyCode::Esc => {
+                            if app.search.value().is_empty() {
+                                app.exit = true;
+                            } else {
+                                app.cancel_search();
+                            }
+                        }
                         KeyCode::Char('j') | KeyCode::Down => app.move_down(),
                         KeyCode::Char('k') | KeyCode::Up => app.move_up(),
                         KeyCode::Tab => app.toggle_focus(),

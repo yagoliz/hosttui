@@ -219,7 +219,7 @@ impl App {
             mode: Mode::Normal,
             exit: false,
             dirty: false,
-            focus: Pane::Hosts,
+            focus: Pane::Groups,
             group_selected: 0,
             search: Input::default(),
             group_entries,
@@ -270,31 +270,33 @@ impl App {
         let filter = group_entries.get(group_selected);
         let mut items = Vec::new();
 
+        let push_sorted_hosts = |items: &mut Vec<ListItem>, mut hosts: Vec<&Host>| {
+            hosts.sort_by(|a, b| a.alias.cmp(&b.alias));
+            for host in hosts {
+                items.push(ListItem::Host(host.alias.clone()));
+            }
+        };
+
         match filter {
             Some(GroupEntry::All) | None => {
-                for group in config.groups() {
-                    items.push(ListItem::GroupHeader(group.name.clone()));
-                    for host in config.hosts_in_group(&group.name) {
-                        items.push(ListItem::Host(host.alias.clone()));
-                    }
+                let mut group_names: Vec<_> =
+                    config.groups().iter().map(|g| g.name.clone()).collect();
+                group_names.sort();
+                for name in &group_names {
+                    items.push(ListItem::GroupHeader(name.clone()));
+                    push_sorted_hosts(&mut items, config.hosts_in_group(name));
                 }
                 let ungrouped = config.ungrouped_hosts();
                 if !ungrouped.is_empty() {
                     items.push(ListItem::GroupHeader("ungrouped".into()));
-                    for host in ungrouped {
-                        items.push(ListItem::Host(host.alias.clone()));
-                    }
+                    push_sorted_hosts(&mut items, ungrouped);
                 }
             }
             Some(GroupEntry::Named(name)) => {
-                for host in config.hosts_in_group(name) {
-                    items.push(ListItem::Host(host.alias.clone()));
-                }
+                push_sorted_hosts(&mut items, config.hosts_in_group(name));
             }
             Some(GroupEntry::Ungrouped) => {
-                for host in config.ungrouped_hosts() {
-                    items.push(ListItem::Host(host.alias.clone()));
-                }
+                push_sorted_hosts(&mut items, config.ungrouped_hosts());
             }
         }
 

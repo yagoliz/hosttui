@@ -8,6 +8,10 @@ repository = "https://github.com/yagoliz/hosttui"
 keywords = ["ssh", "tui", "terminal", "config"]
 categories = ["command-line-utilities"]
 
+[[bin]]
+name = "ht"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = "1.0.102"
 crossterm = "0.29.0"
