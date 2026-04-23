@@ -18,9 +18,9 @@ pub fn render(frame: &mut Frame, app: &App) {
     .areas(frame.area());
 
     let [groups_area, hosts_area, detail_area] = Layout::horizontal([
-        Constraint::Percentage(20),
-        Constraint::Percentage(30),
-        Constraint::Percentage(50),
+        Constraint::Percentage(33),
+        Constraint::Percentage(33),
+        Constraint::Percentage(34),
     ])
     .areas(main_area);
 
@@ -330,7 +330,11 @@ fn render_search_bar(frame: &mut Frame, app: &App, area: Rect) {
         app.search.clone()
     };
     let hint = if active {
-        "  (Enter to keep, Esc to clear)"
+        if app.search.is_empty() {
+            "  (Enter to keep, Esc to clear)"
+        } else {
+            ""
+        }
     } else {
         "  (/ to edit)"
     };
