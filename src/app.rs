@@ -414,7 +414,7 @@ impl App {
         match group {
             GroupEntry::All | GroupEntry::Ungrouped => self.mode = Mode::Adding(FormState::blank()),
             GroupEntry::Named(group_name) => {
-                self.mode = Mode::Adding(FormState::with_group(&group_name))
+                self.mode = Mode::Adding(FormState::with_group(group_name))
             }
         }
     }
