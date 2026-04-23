@@ -1,3 +1,6 @@
+use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo_matcher::{Config as MatcherConfig, Matcher, Utf32Str};
+
 use crate::model::{Config, Host};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,6 +155,7 @@ pub enum Mode {
         input: InputState,
     },
     ConfirmDeleteGroup(String),
+    Searching,
 }
 
 #[derive(Debug, Clone)]
@@ -170,6 +174,7 @@ pub struct App {
     pub dirty: bool,
     pub focus: Pane,
     pub group_selected: usize,
+    pub search: String,
     group_entries: Vec<GroupEntry>,
     items: Vec<ListItem>,
 }
@@ -183,7 +188,7 @@ pub enum ListItem {
 impl App {
     pub fn new(config: Config) -> Self {
         let group_entries = Self::build_group_entries(&config);
-        let items = Self::build_items(&config, &group_entries, 0);
+        let items = Self::build_items(&config, &group_entries, 0, "");
         App {
             config,
             selected: Self::first_host_index(&items),
@@ -192,6 +197,7 @@ impl App {
             dirty: false,
             focus: Pane::Hosts,
             group_selected: 0,
+            search: String::new(),
             group_entries,
             items,
         }
@@ -214,7 +220,29 @@ impl App {
         config: &Config,
         group_entries: &[GroupEntry],
         group_selected: usize,
+        search: &str,
     ) -> Vec<ListItem> {
+        let query = search.trim();
+        if !query.is_empty() {
+            // Global fuzzy search across all hosts, ranked by score.
+            let mut matcher = Matcher::new(MatcherConfig::DEFAULT);
+            let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+            let mut hay_buf = Vec::new();
+            let mut scored: Vec<(&Host, u32)> = config
+                .hosts()
+                .iter()
+                .filter_map(|host| {
+                    let hay = Utf32Str::new(&host.alias, &mut hay_buf);
+                    pattern.score(hay, &mut matcher).map(|s| (host, s))
+                })
+                .collect();
+            scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.alias.cmp(&b.0.alias)));
+            return scored
+                .into_iter()
+                .map(|(h, _)| ListItem::Host(h.alias.clone()))
+                .collect();
+        }
+
         let filter = group_entries.get(group_selected);
         let mut items = Vec::new();
 
@@ -261,7 +289,12 @@ impl App {
         if self.group_selected >= self.group_entries.len() {
             self.group_selected = 0;
         }
-        self.items = Self::build_items(&self.config, &self.group_entries, self.group_selected);
+        self.items = Self::build_items(
+            &self.config,
+            &self.group_entries,
+            self.group_selected,
+            &self.search,
+        );
         if self.selected >= self.items.len() {
             self.selected = Self::first_host_index(&self.items);
         }
@@ -307,8 +340,12 @@ impl App {
             Pane::Groups => {
                 if !self.group_entries.is_empty() {
                     self.group_selected = (self.group_selected + 1) % self.group_entries.len();
-                    self.items =
-                        Self::build_items(&self.config, &self.group_entries, self.group_selected);
+                    self.items = Self::build_items(
+                        &self.config,
+                        &self.group_entries,
+                        self.group_selected,
+                        &self.search,
+                    );
                     self.selected = Self::first_host_index(&self.items);
                 }
             }
@@ -336,8 +373,12 @@ impl App {
                         .group_selected
                         .checked_sub(1)
                         .unwrap_or(self.group_entries.len() - 1);
-                    self.items =
-                        Self::build_items(&self.config, &self.group_entries, self.group_selected);
+                    self.items = Self::build_items(
+                        &self.config,
+                        &self.group_entries,
+                        self.group_selected,
+                        &self.search,
+                    );
                     self.selected = Self::first_host_index(&self.items);
                 }
             }
@@ -513,6 +554,36 @@ impl App {
 
     pub fn cancel_mode(&mut self) {
         self.mode = Mode::Normal;
+    }
+
+    pub fn start_search(&mut self) {
+        self.focus = Pane::Hosts;
+        self.mode = Mode::Searching;
+    }
+
+    pub fn commit_search(&mut self) {
+        // Exits the input mode but keeps the filter applied.
+        self.mode = Mode::Normal;
+    }
+
+    pub fn cancel_search(&mut self) {
+        // Drop the filter entirely and return to the normal view.
+        self.search.clear();
+        self.mode = Mode::Normal;
+        self.rebuild();
+        self.selected = Self::first_host_index(&self.items);
+    }
+
+    pub fn push_search_char(&mut self, c: char) {
+        self.search.push(c);
+        self.rebuild();
+        self.selected = Self::first_host_index(&self.items);
+    }
+
+    pub fn pop_search_char(&mut self) {
+        self.search.pop();
+        self.rebuild();
+        self.selected = Self::first_host_index(&self.items);
     }
 
     pub fn form_state_mut(&mut self) -> Option<&mut FormState> {

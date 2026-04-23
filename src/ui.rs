@@ -10,16 +10,27 @@ use ratatui::{
 use crate::app::{self, App, FormState, GroupEntry, InputState, Mode, Pane};
 
 pub fn render(frame: &mut Frame, app: &App) {
+    let show_search_bar = matches!(app.mode, Mode::Searching) || !app.search.is_empty();
+    let [main_area, search_area] = Layout::vertical([
+        Constraint::Min(1),
+        Constraint::Length(if show_search_bar { 1 } else { 0 }),
+    ])
+    .areas(frame.area());
+
     let [groups_area, hosts_area, detail_area] = Layout::horizontal([
         Constraint::Percentage(20),
         Constraint::Percentage(30),
         Constraint::Percentage(50),
     ])
-    .areas(frame.area());
+    .areas(main_area);
 
     render_groups_pane(frame, app, groups_area);
     render_host_list(frame, app, hosts_area);
     render_detail(frame, app, detail_area);
+
+    if show_search_bar {
+        render_search_bar(frame, app, search_area);
+    }
 
     match &app.mode {
         Mode::Adding(form) => render_form(frame, "Add Host", form),
@@ -34,7 +45,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         ),
         Mode::AddingGroup(input) => render_group_input(frame, "New Group", input),
         Mode::EditingGroup { input, .. } => render_group_input(frame, "Rename Group", input),
-        Mode::Normal => {}
+        Mode::Normal | Mode::Searching => {}
     }
 }
 
@@ -300,6 +311,33 @@ fn render_group_input(frame: &mut Frame, title: &str, input: &InputState) {
     }
 
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn render_search_bar(frame: &mut Frame, app: &App, area: Rect) {
+    let active = matches!(app.mode, Mode::Searching);
+    let prompt_style = if active {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let buffer = if active {
+        format!("{}_", app.search)
+    } else {
+        app.search.clone()
+    };
+    let hint = if active {
+        "  (Enter to keep, Esc to clear)"
+    } else {
+        "  (/ to edit)"
+    };
+    let line = Line::from(vec![
+        Span::styled("/ ", prompt_style),
+        Span::styled(buffer, Style::default().fg(Color::White)),
+        Span::styled(hint, Style::default().fg(Color::DarkGray)),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 fn render_confirm(frame: &mut Frame, title: &str, message: &str) {

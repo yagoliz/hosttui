@@ -51,6 +51,21 @@ fn main() -> anyhow::Result<()> {
                         KeyCode::Char('g') if app.focus == Pane::Groups => {
                             app.start_adding_group();
                         }
+                        KeyCode::Char('/') => app.start_search(),
+                        _ => {}
+                    },
+                    Mode::Searching => match key.code {
+                        KeyCode::Esc => app.cancel_search(),
+                        KeyCode::Enter => app.commit_search(),
+                        KeyCode::Down => app.move_down(),
+                        KeyCode::Up => app.move_up(),
+                        KeyCode::Backspace => app.pop_search_char(),
+                        KeyCode::Char(c) => {
+                            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                continue;
+                            }
+                            app.push_search_char(c);
+                        }
                         _ => {}
                     },
                     Mode::Adding(_) | Mode::Editing { .. } => match key.code {
