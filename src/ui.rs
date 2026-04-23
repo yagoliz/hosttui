@@ -4,7 +4,7 @@ use ratatui::{
     style::{Color, Modifier, Style, Stylize},
     symbols::border,
     text::{Line, Span},
-    widgets::{Block, Clear, List, ListItem, Paragraph},
+    widgets::{Block, Clear, List, ListItem, ListState, Paragraph},
 };
 
 use crate::app::{self, App, FormState, GroupEntry, InputState, Mode, Pane};
@@ -108,7 +108,8 @@ fn render_groups_pane(frame: &mut Frame, app: &App, area: Rect) {
     let block = pane_border("Groups", focused).title_bottom(instructions.centered());
 
     let list = List::new(items).block(block);
-    frame.render_widget(list, area);
+    let mut state = ListState::default().with_selected(Some(app.group_selected));
+    frame.render_stateful_widget(list, area, &mut state);
 }
 
 fn render_host_list(frame: &mut Frame, app: &App, area: Rect) {
@@ -160,7 +161,8 @@ fn render_host_list(frame: &mut Frame, app: &App, area: Rect) {
     let block = pane_border("Hosts", focused).title_bottom(instructions.centered());
 
     let list = List::new(items).block(block);
-    frame.render_widget(list, area);
+    let mut state = ListState::default().with_selected(Some(app.selected));
+    frame.render_stateful_widget(list, area, &mut state);
 }
 
 fn render_detail(frame: &mut Frame, app: &App, area: Rect) {
