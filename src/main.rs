@@ -44,6 +44,9 @@ fn main() -> anyhow::Result<()> {
                         }
                         KeyCode::Char('a') if app.focus == Pane::Hosts => app.start_adding(),
                         KeyCode::Char('e') if app.focus == Pane::Hosts => app.start_editing(),
+                        KeyCode::Char('e') if app.focus == Pane::Groups => {
+                            app.start_editing_group();
+                        }
                         KeyCode::Char('d') => app.start_delete(),
                         KeyCode::Char('g') if app.focus == Pane::Groups => {
                             app.start_adding_group();
@@ -85,7 +88,7 @@ fn main() -> anyhow::Result<()> {
                         }
                         _ => {}
                     },
-                    Mode::AddingGroup(_) => match key.code {
+                    Mode::AddingGroup(_) | Mode::EditingGroup { .. } => match key.code {
                         KeyCode::Esc => app.cancel_mode(),
                         KeyCode::Enter => {
                             app.submit_form();

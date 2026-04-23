@@ -147,6 +147,10 @@ pub enum Mode {
     },
     ConfirmDelete(String),
     AddingGroup(InputState),
+    EditingGroup {
+        original_name: String,
+        input: InputState,
+    },
     ConfirmDeleteGroup(String),
 }
 
@@ -195,8 +199,10 @@ impl App {
 
     fn build_group_entries(config: &Config) -> Vec<GroupEntry> {
         let mut entries = vec![GroupEntry::All];
-        for group in config.groups() {
-            entries.push(GroupEntry::Named(group.name.clone()));
+        let mut group_names: Vec<_> = config.groups().iter().map(|g| g.name.clone()).collect();
+        group_names.sort();
+        for name in group_names {
+            entries.push(GroupEntry::Named(name));
         }
         if !config.ungrouped_hosts().is_empty() {
             entries.push(GroupEntry::Ungrouped);
@@ -373,6 +379,18 @@ impl App {
         });
     }
 
+    pub fn start_editing_group(&mut self) {
+        if let Some(GroupEntry::Named(name)) = self.group_entries.get(self.group_selected) {
+            self.mode = Mode::EditingGroup {
+                original_name: name.clone(),
+                input: InputState {
+                    buffer: name.clone(),
+                    error: None,
+                },
+            };
+        }
+    }
+
     pub fn confirm_delete(&mut self) {
         match &self.mode {
             Mode::ConfirmDelete(alias) => {
@@ -463,6 +481,32 @@ impl App {
                 self.dirty = true;
                 self.mode = Mode::Normal;
             }
+            Mode::EditingGroup {
+                original_name,
+                mut input,
+            } => {
+                let new_name = input.buffer.trim().to_string();
+                if new_name.is_empty() {
+                    input.error = Some("Group name cannot be empty".into());
+                    self.mode = Mode::EditingGroup {
+                        original_name,
+                        input,
+                    };
+                    return;
+                }
+                if new_name != original_name && self.config.find_group(&new_name).is_some() {
+                    input.error = Some(format!("Group '{new_name}' already exists"));
+                    self.mode = Mode::EditingGroup {
+                        original_name,
+                        input,
+                    };
+                    return;
+                }
+                self.config.rename_group(&original_name, &new_name);
+                self.rebuild();
+                self.dirty = true;
+                self.mode = Mode::Normal;
+            }
             _ => {}
         }
     }
@@ -480,7 +524,7 @@ impl App {
 
     pub fn input_state_mut(&mut self) -> Option<&mut InputState> {
         match &mut self.mode {
-            Mode::AddingGroup(input) => Some(input),
+            Mode::AddingGroup(input) | Mode::EditingGroup { input, .. } => Some(input),
             _ => None,
         }
     }

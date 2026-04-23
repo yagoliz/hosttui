@@ -24,9 +24,16 @@ pub fn render(frame: &mut Frame, app: &App) {
     match &app.mode {
         Mode::Adding(form) => render_form(frame, "Add Host", form),
         Mode::Editing { form, .. } => render_form(frame, "Edit Host", form),
-        Mode::ConfirmDelete(alias) => render_confirm(frame, "Confirm Delete", &format!("Delete host '{alias}'?")),
-        Mode::ConfirmDeleteGroup(name) => render_confirm(frame, "Confirm Delete", &format!("Delete group '{name}'?\nHosts will become ungrouped.")),
-        Mode::AddingGroup(input) => render_group_input(frame, input),
+        Mode::ConfirmDelete(alias) => {
+            render_confirm(frame, "Confirm Delete", &format!("Delete host '{alias}'?"))
+        }
+        Mode::ConfirmDeleteGroup(name) => render_confirm(
+            frame,
+            "Confirm Delete",
+            &format!("Delete group '{name}'?\nHosts will become ungrouped."),
+        ),
+        Mode::AddingGroup(input) => render_group_input(frame, "New Group", input),
+        Mode::EditingGroup { input, .. } => render_group_input(frame, "Rename Group", input),
         Mode::Normal => {}
     }
 }
@@ -51,15 +58,21 @@ fn render_groups_pane(frame: &mut Frame, app: &App, area: Rect) {
         .enumerate()
         .map(|(i, entry)| {
             let label = match entry {
-                GroupEntry::All => "All".to_string(),
+                GroupEntry::All => "all".to_string(),
                 GroupEntry::Named(name) => name.clone(),
                 GroupEntry::Ungrouped => "ungrouped".to_string(),
             };
             let style = if i == app.group_selected {
                 if focused {
-                    Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::Black).bg(Color::White).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::White)
+                        .add_modifier(Modifier::BOLD)
                 }
             } else {
                 Style::default()
@@ -72,6 +85,8 @@ fn render_groups_pane(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(vec![
             " g ".into(),
             "New".blue().bold(),
+            " e ".into(),
+            "Rename".blue().bold(),
             " d ".into(),
             "Del".blue().bold(),
         ])
@@ -79,8 +94,7 @@ fn render_groups_pane(frame: &mut Frame, app: &App, area: Rect) {
         Line::default()
     };
 
-    let block = pane_border("Groups", focused)
-        .title_bottom(instructions.centered());
+    let block = pane_border("Groups", focused).title_bottom(instructions.centered());
 
     let list = List::new(items).block(block);
     frame.render_widget(list, area);
@@ -99,9 +113,15 @@ fn render_host_list(frame: &mut Frame, app: &App, area: Rect) {
             app::ListItem::Host(alias) => {
                 let style = if i == app.selected {
                     if focused {
-                        Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(Color::Black).bg(Color::White).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::White)
+                            .add_modifier(Modifier::BOLD)
                     }
                 } else {
                     Style::default()
@@ -126,8 +146,7 @@ fn render_host_list(frame: &mut Frame, app: &App, area: Rect) {
         Line::default()
     };
 
-    let block = pane_border("Hosts", focused)
-        .title_bottom(instructions.centered());
+    let block = pane_border("Hosts", focused).title_bottom(instructions.centered());
 
     let list = List::new(items).block(block);
     frame.render_widget(list, area);
@@ -215,7 +234,9 @@ fn render_form(frame: &mut Frame, title: &str, form: &FormState) {
     for (i, (field, value)) in form.fields.iter().enumerate() {
         let is_active = i == form.active;
         let label_style = if is_active {
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::Gray)
         };
@@ -248,20 +269,25 @@ fn render_form(frame: &mut Frame, title: &str, form: &FormState) {
     }
 }
 
-fn render_group_input(frame: &mut Frame, input: &InputState) {
+fn render_group_input(frame: &mut Frame, title: &str, input: &InputState) {
     let height = if input.error.is_some() { 5 } else { 3 };
     let area = centered_rect(40, height, frame.area());
     frame.render_widget(Clear, area);
 
     let block = Block::bordered()
-        .title(Line::from(" New Group ".bold()).centered())
+        .title(Line::from(format!(" {title} ").bold()).centered())
         .border_set(border::THICK);
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     let mut lines = vec![Line::from(vec![
-        Span::styled("Name: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Name: ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(format!("{}_", input.buffer)),
     ])];
 

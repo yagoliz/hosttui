@@ -89,6 +89,17 @@ impl Config {
     pub fn find_group(&self, name: &str) -> Option<&Group> {
         self.groups.iter().find(|g| g.name == name)
     }
+
+    pub fn rename_group(&mut self, old_name: &str, new_name: &str) {
+        if let Some(group) = self.groups.iter_mut().find(|g| g.name == old_name) {
+            group.name = new_name.into();
+        }
+        for host in &mut self.hosts {
+            if host.group.as_deref() == Some(old_name) {
+                host.group = Some(new_name.into());
+            }
+        }
+    }
 }
 
 #[cfg(test)]
