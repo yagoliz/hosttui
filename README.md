@@ -8,7 +8,7 @@ A terminal UI to manage SSH hosts: browse, organize in groups, and connect.
 - **Groups** — create, delete, and filter hosts by group
 - **CRUD** — add, edit, and delete hosts via a form overlay with validation
 - **Connect** — press Enter to SSH into a host; the TUI suspends cleanly and restores on exit
-- **SSH config generation** — auto-generates `~/.ssh/config.confitui` on every change
+- **SSH config generation** — auto-generates `~/.ssh/config.hosttui` on every change
 - **Persistent config** — hosts are stored in `~/.config/hosttui/hosts.toml` with atomic writes
 
 ## Install
@@ -21,7 +21,7 @@ cargo install --path .
 
 ### From GitHub releases
 
-Download a prebuilt binary from the [releases page](https://github.com/yagoliz/confitui/releases), extract, and place it in your `PATH`.
+Download a prebuilt binary from the [releases page](https://github.com/yagoliz/hosttui/releases), extract, and place it in your `PATH`.
 
 ## Usage
 
@@ -54,10 +54,10 @@ hosttui
 
 ## SSH config integration
 
-hosttui generates `~/.ssh/config.confitui` every time you save a change. To use it, add this to your `~/.ssh/config`:
+hosttui generates `~/.ssh/config.hosttui` every time you save a change. To use it, add this to your `~/.ssh/config`:
 
 ```
-Include config.confitui
+Include config.hosttui
 ```
 
 ## Config format

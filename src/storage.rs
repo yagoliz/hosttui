@@ -6,7 +6,7 @@ use crate::model::Config;
 
 pub fn config_path() -> Result<PathBuf, Error> {
     let dir = dirs::config_dir().ok_or(Error::NoConfigDir)?;
-    Ok(dir.join("confitui").join("hosts.toml"))
+    Ok(dir.join("hosttui").join("hosts.toml"))
 }
 
 pub fn load(path: &Path) -> Result<Config, Error> {
@@ -75,7 +75,9 @@ mod tests {
 
         let config = Config::new(
             vec![host("web", Some("prod")), host("local", None)],
-            vec![Group { name: "prod".into() }],
+            vec![Group {
+                name: "prod".into(),
+            }],
         );
 
         save(&path, &config).unwrap();
@@ -113,7 +115,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("hosts.toml");
 
-        let mut config = Config::new(vec![host("web", Some("prod"))], vec![Group { name: "prod".into() }]);
+        let mut config = Config::new(
+            vec![host("web", Some("prod"))],
+            vec![Group {
+                name: "prod".into(),
+            }],
+        );
         save(&path, &config).unwrap();
 
         config.add_host(host("new", None));
