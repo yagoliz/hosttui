@@ -180,6 +180,13 @@ pub enum Mode {
     },
     ConfirmDeleteGroup(String),
     Searching,
+    Connecting {
+        alias: String,
+    },
+    ConnectError {
+        alias: String,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone)]

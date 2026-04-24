@@ -45,8 +45,53 @@ pub fn render(frame: &mut Frame, app: &App) {
         ),
         Mode::AddingGroup(input) => render_group_input(frame, "New Group", input),
         Mode::EditingGroup { input, .. } => render_group_input(frame, "Rename Group", input),
+        Mode::Connecting { alias } => render_connecting(frame, alias),
+        Mode::ConnectError { alias, message } => render_connect_error(frame, alias, message),
         Mode::Normal | Mode::Searching => {}
     }
+}
+
+fn render_connecting(frame: &mut Frame, alias: &str) {
+    let area = centered_rect(50, 5, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::bordered()
+        .title(Line::from(" Connecting ".bold()).centered())
+        .title_bottom(
+            Line::from(vec![" Esc ".into(), "Cancel".blue().bold()]).centered(),
+        )
+        .border_set(border::THICK);
+
+    let text = vec![
+        Line::default(),
+        Line::from(format!("Connecting to '{alias}'...")).centered(),
+    ];
+
+    frame.render_widget(Paragraph::new(text).block(block), area);
+}
+
+fn render_connect_error(frame: &mut Frame, alias: &str, message: &str) {
+    let area = centered_rect(60, 7, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::bordered()
+        .title(Line::from(" Connection Failed ".bold()).centered())
+        .title_bottom(
+            Line::from(vec![" Enter/Esc ".into(), "Dismiss".blue().bold()]).centered(),
+        )
+        .border_set(border::THICK)
+        .border_style(Style::default().fg(Color::Red));
+
+    let text = vec![
+        Line::from(format!("Could not reach '{alias}':")),
+        Line::default(),
+        Line::from(Span::styled(
+            message.to_string(),
+            Style::default().fg(Color::Red),
+        )),
+    ];
+
+    frame.render_widget(Paragraph::new(text).block(block), area);
 }
 
 fn pane_border(title: &str, focused: bool) -> Block<'_> {
