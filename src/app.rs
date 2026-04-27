@@ -355,6 +355,14 @@ impl App {
         };
     }
 
+    pub fn group_focus(&mut self) {
+        self.focus = Pane::Groups;
+    }
+
+    pub fn host_focus(&mut self) {
+        self.focus = Pane::Hosts;
+    }
+
     pub fn move_down(&mut self) {
         match self.focus {
             Pane::Hosts => {

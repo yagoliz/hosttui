@@ -99,6 +99,8 @@ fn main() -> anyhow::Result<()> {
                         KeyCode::Char('j') | KeyCode::Down => app.move_down(),
                         KeyCode::Char('k') | KeyCode::Up => app.move_up(),
                         KeyCode::Tab => app.toggle_focus(),
+                        KeyCode::Right => app.host_focus(),
+                        KeyCode::Left => app.group_focus(),
                         KeyCode::Enter if app.focus == Pane::Hosts => {
                             if let Some(host) = app.selected_host().cloned() {
                                 match run_probe(terminal, &mut app, &host)? {
