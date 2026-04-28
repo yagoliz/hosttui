@@ -18,6 +18,7 @@ pub enum Field {
     Port,
     IdentityFile,
     Group,
+    Details,
 }
 
 impl Field {
@@ -29,15 +30,74 @@ impl Field {
             Field::Port => "Port",
             Field::IdentityFile => "Identity File",
             Field::Group => "Group",
+            Field::Details => "Details",
         }
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtraField {
+    Key,
+    Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExtraEntryForm {
+    pub key: Input,
+    pub value: Input,
+    pub active: ExtraField,
+    /// `None` when adding a new pair; `Some(i)` when editing the i-th existing pair.
+    pub editing_index: Option<usize>,
+}
+
+impl ExtraEntryForm {
+    fn blank() -> Self {
+        ExtraEntryForm {
+            key: Input::default(),
+            value: Input::default(),
+            active: ExtraField::Key,
+            editing_index: None,
+        }
+    }
+
+    fn from_pair(index: usize, key: &str, value: &str) -> Self {
+        ExtraEntryForm {
+            key: Input::new(key.into()),
+            value: Input::new(value.into()),
+            active: ExtraField::Key,
+            editing_index: Some(index),
+        }
+    }
+
+    pub fn active_input(&mut self) -> &mut Input {
+        match self.active {
+            ExtraField::Key => &mut self.key,
+            ExtraField::Value => &mut self.value,
+        }
+    }
+
+    pub fn toggle_field(&mut self) {
+        self.active = match self.active {
+            ExtraField::Key => ExtraField::Value,
+            ExtraField::Value => ExtraField::Key,
+        };
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ExtrasEditor {
+    pub selected: usize,
+    pub entry: Option<ExtraEntryForm>,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct FormState {
-    pub fields: [(Field, Input); 6],
+    pub fields: [(Field, Input); 7],
     pub active: usize,
     pub error: Option<String>,
+    pub extras: Vec<(String, String)>,
+    pub extras_editor: Option<ExtrasEditor>,
 }
 
 impl FormState {
@@ -50,25 +110,19 @@ impl FormState {
                 (Field::Port, Input::new("22".into())),
                 (Field::IdentityFile, Input::default()),
                 (Field::Group, Input::default()),
+                (Field::Details, Input::default()),
             ],
             active: 0,
             error: None,
+            extras: vec![],
+            extras_editor: None,
         }
     }
 
     fn with_group(group: &str) -> Self {
-        FormState {
-            fields: [
-                (Field::Alias, Input::default()),
-                (Field::Hostname, Input::default()),
-                (Field::User, Input::default()),
-                (Field::Port, Input::new("22".into())),
-                (Field::IdentityFile, Input::default()),
-                (Field::Group, Input::new(group.into())),
-            ],
-            active: 0,
-            error: None,
-        }
+        let mut form = Self::blank();
+        form.fields[5].1 = Input::new(group.into());
+        form
     }
 
     fn from_host(host: &Host) -> Self {
@@ -86,9 +140,121 @@ impl FormState {
                     Field::Group,
                     Input::new(host.group.clone().unwrap_or_default()),
                 ),
+                (Field::Details, Input::new(host.details.clone())),
             ],
             active: 0,
             error: None,
+            extras: host.extra.clone(),
+            extras_editor: None,
+        }
+    }
+
+    pub fn open_extras(&mut self) {
+        if self.extras_editor.is_none() {
+            self.extras_editor = Some(ExtrasEditor::default());
+        }
+    }
+
+    pub fn close_extras(&mut self) {
+        self.extras_editor = None;
+    }
+
+    pub fn extras_editor_mut(&mut self) -> Option<&mut ExtrasEditor> {
+        self.extras_editor.as_mut()
+    }
+
+    /// Begin adding a new key/value pair within the open extras sub-dialog.
+    pub fn extras_begin_add(&mut self) {
+        if let Some(ed) = self.extras_editor.as_mut() {
+            ed.entry = Some(ExtraEntryForm::blank());
+            ed.error = None;
+        }
+    }
+
+    /// Begin editing the currently-selected pair within the open sub-dialog.
+    pub fn extras_begin_edit(&mut self) {
+        let Some(ed) = self.extras_editor.as_mut() else {
+            return;
+        };
+        if let Some((k, v)) = self.extras.get(ed.selected) {
+            ed.entry = Some(ExtraEntryForm::from_pair(ed.selected, k, v));
+            ed.error = None;
+        }
+    }
+
+    pub fn extras_delete_selected(&mut self) {
+        let Some(ed) = self.extras_editor.as_mut() else {
+            return;
+        };
+        if ed.selected < self.extras.len() {
+            self.extras.remove(ed.selected);
+            if ed.selected >= self.extras.len() && !self.extras.is_empty() {
+                ed.selected = self.extras.len() - 1;
+            }
+        }
+    }
+
+    pub fn extras_move_down(&mut self) {
+        if let Some(ed) = self.extras_editor.as_mut()
+            && !self.extras.is_empty()
+        {
+            ed.selected = (ed.selected + 1) % self.extras.len();
+        }
+    }
+
+    pub fn extras_move_up(&mut self) {
+        if let Some(ed) = self.extras_editor.as_mut()
+            && !self.extras.is_empty()
+        {
+            ed.selected = ed.selected.checked_sub(1).unwrap_or(self.extras.len() - 1);
+        }
+    }
+
+    /// Commit the open inner entry form. Returns `true` on success; `false` if
+    /// validation failed (the editor's `error` is set in that case).
+    pub fn extras_commit_entry(&mut self) -> bool {
+        let Some(ed) = self.extras_editor.as_mut() else {
+            return true;
+        };
+        let Some(entry) = ed.entry.as_ref() else {
+            return true;
+        };
+
+        let key = entry.key.value().trim().to_string();
+        let value = entry.value.value().trim().to_string();
+        let editing_index = entry.editing_index;
+
+        if key.is_empty() {
+            ed.error = Some("Key cannot be empty".into());
+            return false;
+        }
+
+        let duplicate = self
+            .extras
+            .iter()
+            .enumerate()
+            .any(|(i, (k, _))| k == &key && Some(i) != editing_index);
+        if duplicate {
+            ed.error = Some(format!("Key '{key}' already exists"));
+            return false;
+        }
+
+        match editing_index {
+            Some(i) => self.extras[i] = (key, value),
+            None => {
+                self.extras.push((key, value));
+                ed.selected = self.extras.len() - 1;
+            }
+        }
+        ed.entry = None;
+        ed.error = None;
+        true
+    }
+
+    pub fn extras_cancel_entry(&mut self) {
+        if let Some(ed) = self.extras_editor.as_mut() {
+            ed.entry = None;
+            ed.error = None;
         }
     }
 
@@ -145,6 +311,8 @@ impl FormState {
             if v.is_empty() { None } else { Some(v) }
         };
 
+        let details = self.value(Field::Details).trim().to_string();
+
         Ok(Host {
             alias,
             hostname,
@@ -152,7 +320,8 @@ impl FormState {
             port,
             identity_file,
             group,
-            extra: vec![],
+            details,
+            extra: self.extras.clone(),
         })
     }
 }

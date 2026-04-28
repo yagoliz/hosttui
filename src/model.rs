@@ -10,7 +10,10 @@ pub struct Host {
     pub port: u16,
     pub identity_file: Option<String>,
     pub group: Option<String>,
+    #[serde(default)]
     pub extra: Vec<(String, String)>,
+    #[serde(default)]
+    pub details: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -115,6 +118,7 @@ mod tests {
             identity_file: Some("~/.ssh/id_rsa".into()),
             group: group.map(Into::into),
             extra: vec![],
+            details: "Test host".into(),
         }
     }
 
@@ -143,6 +147,7 @@ mod tests {
         assert_eq!(h.port, 22);
         assert_eq!(h.identity_file, Some("~/.ssh/id_rsa".into()));
         assert_eq!(h.group, Some("group".into()));
+        assert_eq!(h.details, "Test host");
     }
 
     #[test]
@@ -198,10 +203,7 @@ mod tests {
 
     #[test]
     fn duplicate_aliases_detected() {
-        let config = Config::new(
-            vec![host("dup", None), host("dup", Some("group"))],
-            vec![],
-        );
+        let config = Config::new(vec![host("dup", None), host("dup", Some("group"))], vec![]);
         assert!(!config.has_unique_aliases());
     }
 

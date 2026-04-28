@@ -93,6 +93,7 @@ mod tests {
             identity_file: None,
             group: group.map(Into::into),
             extra: vec![],
+            details: "".into(),
         }
     }
 
@@ -135,6 +136,7 @@ mod tests {
                 identity_file: Some("~/.ssh/mykey".into()),
                 group: None,
                 extra: vec![("ForwardAgent".into(), "yes".into())],
+                details: "".into(),
             }],
             vec![],
         );

@@ -7,7 +7,9 @@ use ratatui::{
     widgets::{Block, Clear, List, ListItem, ListState, Paragraph},
 };
 
-use crate::app::{self, App, FormState, GroupEntry, InputState, Mode, Pane};
+use crate::app::{
+    self, App, ExtraField, ExtrasEditor, FormState, GroupEntry, InputState, Mode, Pane,
+};
 
 pub fn render(frame: &mut Frame, app: &App) {
     let show_search_bar = matches!(app.mode, Mode::Searching) || !app.search.value().is_empty();
@@ -33,8 +35,18 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
 
     match &app.mode {
-        Mode::Adding(form) => render_form(frame, "Add Host", form),
-        Mode::Editing { form, .. } => render_form(frame, "Edit Host", form),
+        Mode::Adding(form) => {
+            render_form(frame, "Add Host", form);
+            if let Some(ed) = &form.extras_editor {
+                render_extras(frame, form, ed);
+            }
+        }
+        Mode::Editing { form, .. } => {
+            render_form(frame, "Edit Host", form);
+            if let Some(ed) = &form.extras_editor {
+                render_extras(frame, form, ed);
+            }
+        }
         Mode::ConfirmDelete(alias) => {
             render_confirm(frame, "Confirm Delete", &format!("Delete host '{alias}'?"))
         }
@@ -57,9 +69,7 @@ fn render_connecting(frame: &mut Frame, alias: &str) {
 
     let block = Block::bordered()
         .title(Line::from(" Connecting ".bold()).centered())
-        .title_bottom(
-            Line::from(vec![" Esc ".into(), "Cancel".blue().bold()]).centered(),
-        )
+        .title_bottom(Line::from(vec![" Esc ".into(), "Cancel".blue().bold()]).centered())
         .border_set(border::THICK);
 
     let text = vec![
@@ -76,9 +86,7 @@ fn render_connect_error(frame: &mut Frame, alias: &str, message: &str) {
 
     let block = Block::bordered()
         .title(Line::from(" Connection Failed ".bold()).centered())
-        .title_bottom(
-            Line::from(vec![" Enter/Esc ".into(), "Dismiss".blue().bold()]).centered(),
-        )
+        .title_bottom(Line::from(vec![" Enter/Esc ".into(), "Dismiss".blue().bold()]).centered())
         .border_set(border::THICK)
         .border_style(Style::default().fg(Color::Red));
 
@@ -243,6 +251,11 @@ fn render_detail(frame: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(vec![label(key), Span::raw(val)]));
     }
 
+    lines.push(Line::from(vec![
+        label("Comments"),
+        Span::raw(&host.details),
+    ]));
+
     let detail = Paragraph::new(lines).block(block);
     frame.render_widget(detail, area);
 }
@@ -258,18 +271,18 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 }
 
 fn render_form(frame: &mut Frame, title: &str, form: &FormState) {
-    let area = centered_rect(50, (form.fields.len() as u16) + 5, frame.area());
+    let area = centered_rect(75, (form.fields.len() as u16) + 6, frame.area());
     frame.render_widget(Clear, area);
 
+    let extras_label = format!(" Ctrl+K Extras ({}) ", form.extras.len());
     let instructions = Line::from(vec![
         " Tab ".into(),
         "Next".blue().bold(),
-        " Shift+Tab ".into(),
-        "Prev".blue().bold(),
         " Enter ".into(),
         "Save".blue().bold(),
+        extras_label.into(),
         " Esc ".into(),
-        "Cancel".blue().bold(),
+        "Cancel ".blue().bold(),
     ]);
 
     let block = Block::bordered()
@@ -399,6 +412,167 @@ fn render_search_bar(frame: &mut Frame, app: &App, area: Rect) {
         if cursor_x < area.x + area.width {
             frame.set_cursor_position(Position::new(cursor_x, area.y));
         }
+    }
+}
+
+fn render_extras(frame: &mut Frame, form: &FormState, ed: &ExtrasEditor) {
+    if ed.entry.is_some() {
+        render_extras_entry(frame, ed);
+        return;
+    }
+
+    let height = (form.extras.len().max(1) as u16).min(12) + 4 + ed.error.is_some() as u16;
+    let area = centered_rect(60, height, frame.area());
+    frame.render_widget(Clear, area);
+
+    let instructions = Line::from(vec![
+        " a ".into(),
+        "Add".blue().bold(),
+        " e ".into(),
+        "Edit".blue().bold(),
+        " d ".into(),
+        "Del".blue().bold(),
+        " Esc ".into(),
+        "Close".blue().bold(),
+    ]);
+
+    let block = Block::bordered()
+        .title(Line::from(" Extras ".bold()).centered())
+        .title_bottom(instructions.centered())
+        .border_set(border::THICK);
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let constraints: Vec<Constraint> = if form.extras.is_empty() {
+        vec![Constraint::Min(1)]
+    } else {
+        let mut v: Vec<Constraint> = form.extras.iter().map(|_| Constraint::Length(1)).collect();
+        if ed.error.is_some() {
+            v.push(Constraint::Length(1));
+        }
+        v
+    };
+    let rows = Layout::vertical(constraints).split(inner);
+
+    if form.extras.is_empty() {
+        let line = Line::from(Span::styled(
+            "  (no extras — press 'a' to add)",
+            Style::default().fg(Color::DarkGray),
+        ));
+        frame.render_widget(Paragraph::new(line), rows[0]);
+    } else {
+        for (i, (k, v)) in form.extras.iter().enumerate() {
+            let style = if i == ed.selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let line = Line::from(format!(" {k} = {v}")).style(style);
+            frame.render_widget(Paragraph::new(line), rows[i]);
+        }
+        if let Some(ref err) = ed.error {
+            let err_line = Line::from(Span::styled(
+                format!(" {err}"),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ));
+            frame.render_widget(Paragraph::new(err_line), rows[form.extras.len()]);
+        }
+    }
+}
+
+fn render_extras_entry(frame: &mut Frame, ed: &ExtrasEditor) {
+    let entry = ed.entry.as_ref().expect("entry must be set");
+    let height = if ed.error.is_some() { 6 } else { 5 };
+    let area = centered_rect(60, height, frame.area());
+    frame.render_widget(Clear, area);
+
+    let title = if entry.editing_index.is_some() {
+        " Edit Extra "
+    } else {
+        " New Extra "
+    };
+    let instructions = Line::from(vec![
+        " Tab ".into(),
+        "Switch".blue().bold(),
+        " Enter ".into(),
+        "Save".blue().bold(),
+        " Esc ".into(),
+        "Cancel".blue().bold(),
+    ]);
+    let block = Block::bordered()
+        .title(Line::from(title.bold()).centered())
+        .title_bottom(instructions.centered())
+        .border_set(border::THICK);
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let constraints: Vec<Constraint> = if ed.error.is_some() {
+        vec![
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(2),
+        ]
+    } else {
+        vec![Constraint::Length(1), Constraint::Length(1)]
+    };
+    let rows = Layout::vertical(constraints).split(inner);
+
+    let label_width = 9; // "{:>7}: "
+
+    let render_field =
+        |frame: &mut Frame, row: Rect, label: &str, input: &tui_input::Input, active: bool| {
+            let label_style = if active {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            let value_style = if active {
+                Style::default().fg(Color::White)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            let line = Line::from(vec![
+                Span::styled(format!("{:>7}: ", label), label_style),
+                Span::styled(input.value().to_string(), value_style),
+            ]);
+            frame.render_widget(Paragraph::new(line), row);
+
+            if active {
+                let cursor_x = row.x + label_width + input.visual_cursor() as u16;
+                if cursor_x < row.x + row.width {
+                    frame.set_cursor_position(Position::new(cursor_x, row.y));
+                }
+            }
+        };
+
+    render_field(
+        frame,
+        rows[0],
+        "Key",
+        &entry.key,
+        entry.active == ExtraField::Key,
+    );
+    render_field(
+        frame,
+        rows[1],
+        "Value",
+        &entry.value,
+        entry.active == ExtraField::Value,
+    );
+
+    if let Some(ref err) = ed.error {
+        let err_line = Line::from(Span::styled(
+            format!("  {err}"),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ));
+        frame.render_widget(Paragraph::new(err_line), rows[2]);
     }
 }
 

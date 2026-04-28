@@ -3,7 +3,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use tui_input::backend::crossterm::EventHandler;
 
 use hosttui::app::{App, Mode, Pane};
@@ -60,6 +60,48 @@ where
                 return Ok(ProbeOutcome::Failed("probe thread died".into()));
             }
             Err(mpsc::TryRecvError::Empty) => {}
+        }
+    }
+}
+
+fn handle_extras_key(app: &mut App, ev: &Event, code: KeyCode) {
+    let Some(form) = app.form_state_mut() else {
+        return;
+    };
+    let Some(ed) = form.extras_editor.as_mut() else {
+        return;
+    };
+
+    if ed.entry.is_some() {
+        // Inner Key/Value editor.
+        match code {
+            KeyCode::Esc => form.extras_cancel_entry(),
+            KeyCode::Enter => {
+                form.extras_commit_entry();
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                if let Some(entry) = ed.entry.as_mut() {
+                    entry.toggle_field();
+                }
+            }
+            _ => {
+                if let Some(entry) = ed.entry.as_mut()
+                    && entry.active_input().handle_event(ev).is_some()
+                {
+                    ed.error = None;
+                }
+            }
+        }
+    } else {
+        // Browsing the extras list.
+        match code {
+            KeyCode::Esc => form.close_extras(),
+            KeyCode::Char('a') => form.extras_begin_add(),
+            KeyCode::Char('e') => form.extras_begin_edit(),
+            KeyCode::Char('d') => form.extras_delete_selected(),
+            KeyCode::Down | KeyCode::Char('j') => form.extras_move_down(),
+            KeyCode::Up | KeyCode::Char('k') => form.extras_move_up(),
+            _ => {}
         }
     }
 }
@@ -144,33 +186,51 @@ fn main() -> anyhow::Result<()> {
                             }
                         }
                     },
-                    Mode::Adding(_) | Mode::Editing { .. } => match key.code {
-                        KeyCode::Esc => app.cancel_mode(),
-                        KeyCode::Enter => {
-                            app.submit_form();
-                            if matches!(app.mode, Mode::Normal) && app.dirty {
-                                persist(&path, &app.config)?;
-                                app.dirty = false;
+                    Mode::Adding(_) | Mode::Editing { .. } => {
+                        let extras_open = app
+                            .form_state_mut()
+                            .map(|f| f.extras_editor.is_some())
+                            .unwrap_or(false);
+
+                        if extras_open {
+                            handle_extras_key(&mut app, &ev, key.code);
+                        } else {
+                            match key.code {
+                                KeyCode::Esc => app.cancel_mode(),
+                                KeyCode::Enter => {
+                                    app.submit_form();
+                                    if matches!(app.mode, Mode::Normal) && app.dirty {
+                                        persist(&path, &app.config)?;
+                                        app.dirty = false;
+                                    }
+                                }
+                                KeyCode::Tab | KeyCode::Down => {
+                                    if let Some(form) = app.form_state_mut() {
+                                        form.next_field();
+                                    }
+                                }
+                                KeyCode::BackTab | KeyCode::Up => {
+                                    if let Some(form) = app.form_state_mut() {
+                                        form.prev_field();
+                                    }
+                                }
+                                KeyCode::Char('k')
+                                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                                {
+                                    if let Some(form) = app.form_state_mut() {
+                                        form.open_extras();
+                                    }
+                                }
+                                _ => {
+                                    if let Some(form) = app.form_state_mut()
+                                        && form.active_input().handle_event(&ev).is_some()
+                                    {
+                                        form.error = None;
+                                    }
+                                }
                             }
                         }
-                        KeyCode::Tab => {
-                            if let Some(form) = app.form_state_mut() {
-                                form.next_field();
-                            }
-                        }
-                        KeyCode::BackTab => {
-                            if let Some(form) = app.form_state_mut() {
-                                form.prev_field();
-                            }
-                        }
-                        _ => {
-                            if let Some(form) = app.form_state_mut()
-                                && form.active_input().handle_event(&ev).is_some()
-                            {
-                                form.error = None;
-                            }
-                        }
-                    },
+                    }
                     Mode::AddingGroup(_) | Mode::EditingGroup { .. } => match key.code {
                         KeyCode::Esc => app.cancel_mode(),
                         KeyCode::Enter => {

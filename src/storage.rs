@@ -65,6 +65,7 @@ mod tests {
             identity_file: None,
             group: group.map(Into::into),
             extra: vec![],
+            details: "".into(),
         }
     }
 
