@@ -26,7 +26,7 @@ Download a prebuilt binary from the [releases page](https://github.com/yagoliz/h
 ## Usage
 
 ```
-hosttui
+ht (hosttui's short name)
 ```
 
 ### Key bindings
@@ -57,6 +57,7 @@ hosttui
 hosttui generates `~/.ssh/config.hosttui` every time you save a change. To use it, add this to your `~/.ssh/config`:
 
 ```
+Match all
 Include config.hosttui
 ```
 
