@@ -53,7 +53,7 @@ impl Widget for TerminalView<'_> {
                 if contents.is_empty() {
                     buf[(x, y)].set_char(' ').set_style(style);
                 } else {
-                    buf[(x, y)].set_symbol(&contents).set_style(style);
+                    buf[(x, y)].set_symbol(contents).set_style(style);
                 }
             }
         }

@@ -45,7 +45,7 @@ impl Session {
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .map_err(|e| io::Error::other(e))?;
+            .map_err(io::Error::other)?;
 
         let args = ssh::ssh_args(host);
         let mut cmd = CommandBuilder::new("ssh");
@@ -56,18 +56,18 @@ impl Session {
         let child = pair
             .slave
             .spawn_command(cmd)
-            .map_err(|e| io::Error::other(e))?;
+            .map_err(io::Error::other)?;
 
         drop(pair.slave);
 
         let reader = pair
             .master
             .try_clone_reader()
-            .map_err(|e| io::Error::other(e))?;
+            .map_err(io::Error::other)?;
         let writer = pair
             .master
             .take_writer()
-            .map_err(|e| io::Error::other(e))?;
+            .map_err(io::Error::other)?;
 
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
         let exited = Arc::new(AtomicBool::new(false));

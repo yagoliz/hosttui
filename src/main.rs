@@ -238,10 +238,10 @@ fn handle_session_key(app: &mut App, key: &crossterm::event::KeyEvent) {
         PrefixState::Inactive => {
             if key.code == KeyCode::Char('t') && key.modifiers.contains(KeyModifiers::CONTROL) {
                 app.prefix = PrefixState::Pending;
-            } else if let Some(bytes) = keys::encode(key) {
-                if let Some(session) = app.active_session_mut() {
-                    session.write(&bytes);
-                }
+            } else if let Some(bytes) = keys::encode(key)
+                && let Some(session) = app.active_session_mut()
+            {
+                session.write(&bytes);
             }
         }
     }
