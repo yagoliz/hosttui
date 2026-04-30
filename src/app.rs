@@ -2,12 +2,29 @@ use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config as MatcherConfig, Matcher, Utf32Str};
 use tui_input::Input;
 
+use std::sync::atomic::Ordering;
+
 use crate::model::{Config, Host};
+use crate::pty::Session;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pane {
     Groups,
     Hosts,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum View {
+    #[default]
+    Hosts,
+    Session(usize),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PrefixState {
+    #[default]
+    Inactive,
+    Pending,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -349,9 +366,6 @@ pub enum Mode {
     },
     ConfirmDeleteGroup(String),
     Searching,
-    Connecting {
-        alias: String,
-    },
     ConnectError {
         alias: String,
         message: String,
@@ -375,6 +389,9 @@ pub struct App {
     pub focus: Pane,
     pub group_selected: usize,
     pub search: Input,
+    pub view: View,
+    pub sessions: Vec<Session>,
+    pub prefix: PrefixState,
     group_entries: Vec<GroupEntry>,
     items: Vec<ListItem>,
 }
@@ -398,6 +415,9 @@ impl App {
             focus: Pane::Groups,
             group_selected: 0,
             search: Input::default(),
+            view: View::Hosts,
+            sessions: Vec::new(),
+            prefix: PrefixState::Inactive,
             group_entries,
             items,
         }
@@ -804,5 +824,95 @@ impl App {
             Mode::AddingGroup(input) | Mode::EditingGroup { input, .. } => Some(input),
             _ => None,
         }
+    }
+
+    pub fn open_session(&mut self, rows: u16, cols: u16) {
+        let Some(host) = self.selected_host().cloned() else {
+            return;
+        };
+        if let Some(idx) = self.find_session_by_alias(&host.alias) {
+            self.switch_to_session(idx);
+            return;
+        }
+        match Session::spawn(&host, rows, cols) {
+            Ok(session) => {
+                self.sessions.push(session);
+                self.switch_to_session(self.sessions.len() - 1);
+            }
+            Err(e) => {
+                self.mode = Mode::ConnectError {
+                    alias: host.alias,
+                    message: e.to_string(),
+                };
+            }
+        }
+    }
+
+    pub fn switch_to_hosts(&mut self) {
+        self.view = View::Hosts;
+    }
+
+    pub fn close_current_session(&mut self) {
+        let View::Session(idx) = self.view else {
+            return;
+        };
+        if idx >= self.sessions.len() {
+            return;
+        }
+        self.sessions.remove(idx);
+        if self.sessions.is_empty() {
+            self.view = View::Hosts;
+        } else if idx >= self.sessions.len() {
+            self.view = View::Session(self.sessions.len() - 1);
+        }
+    }
+
+    pub fn switch_to_session(&mut self, idx: usize) {
+        if idx < self.sessions.len() {
+            self.view = View::Session(idx);
+            self.sessions[idx].unread.store(false, Ordering::SeqCst);
+        }
+    }
+
+    pub fn active_session_mut(&mut self) -> Option<&mut Session> {
+        match self.view {
+            View::Session(idx) => self.sessions.get_mut(idx),
+            View::Hosts => None,
+        }
+    }
+
+    pub fn has_active_sessions(&self) -> bool {
+        !self.sessions.is_empty()
+    }
+
+    pub fn next_tab(&mut self) {
+        if self.sessions.is_empty() {
+            return;
+        }
+        match self.view {
+            View::Hosts => self.switch_to_session(0),
+            View::Session(idx) => {
+                if idx + 1 < self.sessions.len() {
+                    self.switch_to_session(idx + 1);
+                } else {
+                    self.switch_to_hosts();
+                }
+            }
+        }
+    }
+
+    pub fn prev_tab(&mut self) {
+        if self.sessions.is_empty() {
+            return;
+        }
+        match self.view {
+            View::Hosts => self.switch_to_session(self.sessions.len() - 1),
+            View::Session(0) => self.switch_to_hosts(),
+            View::Session(idx) => self.switch_to_session(idx - 1),
+        }
+    }
+
+    pub fn find_session_by_alias(&self, alias: &str) -> Option<usize> {
+        self.sessions.iter().position(|s| s.alias == alias)
     }
 }
