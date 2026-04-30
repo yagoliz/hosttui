@@ -57,6 +57,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         Mode::AddingGroup(input) => render_group_input(frame, "New Group", input),
         Mode::EditingGroup { input, .. } => render_group_input(frame, "Rename Group", input),
         Mode::ConnectError { alias, message } => render_connect_error(frame, alias, message),
+        Mode::TabHelp => render_tab_help(frame),
         Mode::Normal | Mode::Searching => {}
     }
 }
@@ -176,6 +177,15 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
         ));
     }
 
+    let used: usize = spans.iter().map(|s| s.width()).sum();
+    let hint = "^T ? help";
+    let hint_width = hint.len();
+    if area.width as usize > used + hint_width + 1 {
+        let pad = area.width as usize - used - hint_width;
+        spans.push(Span::raw(" ".repeat(pad)));
+        spans.push(Span::styled(hint, Style::default().fg(Color::DarkGray)));
+    }
+
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -196,6 +206,29 @@ fn render_connect_error(frame: &mut Frame, alias: &str, message: &str) {
             message.to_string(),
             Style::default().fg(Color::Red),
         )),
+    ];
+
+    frame.render_widget(Paragraph::new(text).block(block), area);
+}
+
+fn render_tab_help(frame: &mut Frame) {
+    let area = centered_rect(40, 11, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::bordered()
+        .title(Line::from(" Tab Keys ".bold()).centered())
+        .title_bottom(Line::from(vec![" any key ".into(), "Dismiss".blue().bold()]).centered())
+        .border_set(border::THICK)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let key_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    let text = vec![
+        Line::from(vec![Span::styled("^T h  ", key_style), Span::raw("Switch to hosts")]),
+        Line::from(vec![Span::styled("^T 1-9", key_style), Span::raw(" Switch to tab N")]),
+        Line::from(vec![Span::styled("^T n  ", key_style), Span::raw("Next tab")]),
+        Line::from(vec![Span::styled("^T p  ", key_style), Span::raw("Previous tab")]),
+        Line::from(vec![Span::styled("^T x  ", key_style), Span::raw("Close current tab")]),
+        Line::from(vec![Span::styled("^T ^T ", key_style), Span::raw("Send literal ^T")]),
     ];
 
     frame.render_widget(Paragraph::new(text).block(block), area);

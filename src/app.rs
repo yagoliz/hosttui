@@ -370,6 +370,7 @@ pub enum Mode {
         alias: String,
         message: String,
     },
+    TabHelp,
 }
 
 #[derive(Debug, Clone)]

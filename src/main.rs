@@ -77,6 +77,7 @@ fn handle_hosts_key(
                     }
                     KeyCode::Char('n') => app.next_tab(),
                     KeyCode::Char('p') => app.prev_tab(),
+                    KeyCode::Char('?') => app.mode = Mode::TabHelp,
                     _ => {}
                 }
                 return Ok(());
@@ -192,6 +193,9 @@ fn handle_hosts_key(
             KeyCode::Enter | KeyCode::Esc => app.cancel_mode(),
             _ => {}
         },
+        Mode::TabHelp => {
+            app.cancel_mode();
+        }
         Mode::ConfirmDelete(_) | Mode::ConfirmDeleteGroup(_) => match code {
             KeyCode::Char('y') => {
                 app.confirm_delete();
@@ -206,6 +210,10 @@ fn handle_hosts_key(
 }
 
 fn handle_session_key(app: &mut App, key: &crossterm::event::KeyEvent) {
+    if matches!(app.mode, Mode::TabHelp) {
+        app.cancel_mode();
+        return;
+    }
     match app.prefix {
         PrefixState::Pending => {
             app.prefix = PrefixState::Inactive;
@@ -218,6 +226,7 @@ fn handle_session_key(app: &mut App, key: &crossterm::event::KeyEvent) {
                 KeyCode::Char('n') => app.next_tab(),
                 KeyCode::Char('p') => app.prev_tab(),
                 KeyCode::Char('x') => app.close_current_session(),
+                KeyCode::Char('?') => app.mode = Mode::TabHelp,
                 KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     if let Some(session) = app.active_session_mut() {
                         session.write(&[0x14]);
