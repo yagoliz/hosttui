@@ -2,7 +2,10 @@ use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config as MatcherConfig, Matcher, Utf32Str};
 use tui_input::Input;
 
+use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::model::{Config, Host};
 use crate::pty::{Session, SessionStatus};
@@ -349,6 +352,12 @@ pub struct InputState {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub enum TestStatus {
+    Testing,
+    Done { success: bool, message: String },
+}
+
 #[derive(Debug, Clone, Default)]
 pub enum Mode {
     #[default]
@@ -369,6 +378,10 @@ pub enum Mode {
     ConnectError {
         alias: String,
         message: String,
+    },
+    TestResult {
+        alias: String,
+        status: Arc<Mutex<TestStatus>>,
     },
     TabHelp,
 }
@@ -847,6 +860,53 @@ impl App {
                 };
             }
         }
+    }
+
+    pub fn test_host(&mut self) {
+        let Some(host) = self.selected_host().cloned() else {
+            return;
+        };
+
+        let status = Arc::new(Mutex::new(TestStatus::Testing));
+        self.mode = Mode::TestResult {
+            alias: host.alias.clone(),
+            status: Arc::clone(&status),
+        };
+
+        let hostname = host.hostname;
+        let port = host.port;
+
+        std::thread::spawn(move || {
+            let addr_str = format!("{hostname}:{port}");
+            let timeout = Duration::from_secs(3);
+
+            let result = match addr_str.to_socket_addrs() {
+                Ok(addrs) => {
+                    let mut last_err = None;
+                    for addr in addrs {
+                        match TcpStream::connect_timeout(&addr, timeout) {
+                            Ok(_) => {
+                                *status.lock().unwrap() = TestStatus::Done {
+                                    success: true,
+                                    message: format!("Port {port} is open"),
+                                };
+                                return;
+                            }
+                            Err(e) => last_err = Some(e),
+                        }
+                    }
+                    last_err
+                        .map(|e| e.to_string())
+                        .unwrap_or_else(|| "No addresses found".into())
+                }
+                Err(e) => e.to_string(),
+            };
+
+            *status.lock().unwrap() = TestStatus::Done {
+                success: false,
+                message: result,
+            };
+        });
     }
 
     pub fn switch_to_hosts(&mut self) {

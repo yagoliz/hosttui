@@ -111,10 +111,14 @@ fn handle_hosts_key(
                 }
                 KeyCode::Char('/') => app.start_search(),
                 KeyCode::Char('t')
-                    if modifiers.contains(KeyModifiers::CONTROL)
-                        && app.has_active_sessions() =>
+                    if modifiers.contains(KeyModifiers::CONTROL) && app.has_active_sessions() =>
                 {
                     app.prefix = PrefixState::Pending;
+                }
+                KeyCode::Char('t')
+                    if !modifiers.contains(KeyModifiers::CONTROL) && app.focus == Pane::Hosts =>
+                {
+                    app.test_host()
                 }
                 _ => {}
             }
@@ -190,7 +194,7 @@ fn handle_hosts_key(
                 }
             }
         },
-        Mode::ConnectError { .. } => match code {
+        Mode::ConnectError { .. } | Mode::TestResult { .. } => match code {
             KeyCode::Enter | KeyCode::Esc => app.cancel_mode(),
             _ => {}
         },
@@ -248,11 +252,7 @@ fn handle_session_key(app: &mut App, key: &crossterm::event::KeyEvent) {
     }
 }
 
-fn run(
-    terminal: &mut ratatui::DefaultTerminal,
-    app: &mut App,
-    path: &Path,
-) -> anyhow::Result<()> {
+fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, path: &Path) -> anyhow::Result<()> {
     while !app.exit {
         for session in &mut app.sessions {
             session.update_status();
@@ -261,7 +261,7 @@ fn run(
 
         terminal.draw(|frame| ui::render(frame, app))?;
 
-        let timeout = if app.has_active_sessions() {
+        let timeout = if app.has_active_sessions() || matches!(app.mode, Mode::TestResult { .. }) {
             Duration::from_millis(16)
         } else {
             Duration::from_secs(1)

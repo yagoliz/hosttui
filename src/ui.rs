@@ -10,8 +10,8 @@ use ratatui::{
 use std::sync::atomic::Ordering;
 
 use crate::app::{
-    self, App, ExtraField, ExtrasEditor, FormState, GroupEntry, InputState, Mode, Pane, PrefixState,
-    View,
+    self, App, ExtraField, ExtrasEditor, FormState, GroupEntry, InputState, Mode, Pane,
+    PrefixState, TestStatus, View,
 };
 use crate::pty::SessionStatus;
 use crate::terminal_widget::TerminalView;
@@ -57,6 +57,10 @@ pub fn render(frame: &mut Frame, app: &App) {
         Mode::AddingGroup(input) => render_group_input(frame, "New Group", input),
         Mode::EditingGroup { input, .. } => render_group_input(frame, "Rename Group", input),
         Mode::ConnectError { alias, message } => render_connect_error(frame, alias, message),
+        Mode::TestResult { alias, status } => {
+            let status = status.lock().unwrap();
+            render_test_result(frame, alias, &status);
+        }
         Mode::TabHelp => render_tab_help(frame),
         Mode::Normal | Mode::Searching => {}
     }
@@ -126,9 +130,7 @@ fn render_session_view(frame: &mut Frame, app: &App, idx: usize, area: Rect) {
         let line = Line::from(vec![
             Span::styled(
                 " [disconnected] ",
-                Style::default()
-                    .fg(Color::Red)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ),
             Span::styled("Ctrl+T x to close", Style::default().fg(Color::DarkGray)),
         ]);
@@ -223,6 +225,62 @@ fn render_connect_error(frame: &mut Frame, alias: &str, message: &str) {
     frame.render_widget(Paragraph::new(text).block(block), area);
 }
 
+fn render_test_result(frame: &mut Frame, alias: &str, status: &TestStatus) {
+    let area = centered_rect(60, 7, frame.area());
+    frame.render_widget(Clear, area);
+
+    match status {
+        TestStatus::Testing => {
+            let block = Block::bordered()
+                .title(Line::from(" Testing Connection ".bold()).centered())
+                .title_bottom(
+                    Line::from(vec![" Esc ".into(), "Cancel".blue().bold()]).centered(),
+                )
+                .border_set(border::THICK)
+                .border_style(Style::default().fg(Color::Yellow));
+
+            let text = vec![
+                Line::from(format!("Host '{alias}':")),
+                Line::default(),
+                Line::from(Span::styled(
+                    "Connecting...",
+                    Style::default().fg(Color::Yellow),
+                )),
+            ];
+
+            frame.render_widget(Paragraph::new(text).block(block), area);
+        }
+        TestStatus::Done { success, message } => {
+            let (title, border_color) = if *success {
+                (" Reachable ", Color::Green)
+            } else {
+                (" Unreachable ", Color::Red)
+            };
+
+            let block = Block::bordered()
+                .title(Line::from(title.bold()).centered())
+                .title_bottom(
+                    Line::from(vec![" Enter/Esc ".into(), "Dismiss".blue().bold()]).centered(),
+                )
+                .border_set(border::THICK)
+                .border_style(Style::default().fg(border_color));
+
+            let result_color = if *success { Color::Green } else { Color::Red };
+
+            let text = vec![
+                Line::from(format!("Host '{alias}':")),
+                Line::default(),
+                Line::from(Span::styled(
+                    message.to_string(),
+                    Style::default().fg(result_color),
+                )),
+            ];
+
+            frame.render_widget(Paragraph::new(text).block(block), area);
+        }
+    }
+}
+
 fn render_tab_help(frame: &mut Frame) {
     let area = centered_rect(40, 11, frame.area());
     frame.render_widget(Clear, area);
@@ -233,14 +291,34 @@ fn render_tab_help(frame: &mut Frame) {
         .border_set(border::THICK)
         .border_style(Style::default().fg(Color::Cyan));
 
-    let key_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    let key_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
     let text = vec![
-        Line::from(vec![Span::styled("^T h  ", key_style), Span::raw("Switch to hosts")]),
-        Line::from(vec![Span::styled("^T 1-9", key_style), Span::raw(" Switch to tab N")]),
-        Line::from(vec![Span::styled("^T n  ", key_style), Span::raw("Next tab")]),
-        Line::from(vec![Span::styled("^T p  ", key_style), Span::raw("Previous tab")]),
-        Line::from(vec![Span::styled("^T x  ", key_style), Span::raw("Close current tab")]),
-        Line::from(vec![Span::styled("^T ^T ", key_style), Span::raw("Send literal ^T")]),
+        Line::from(vec![
+            Span::styled("^T h  ", key_style),
+            Span::raw("Switch to hosts"),
+        ]),
+        Line::from(vec![
+            Span::styled("^T 1-9", key_style),
+            Span::raw(" Switch to tab N"),
+        ]),
+        Line::from(vec![
+            Span::styled("^T n  ", key_style),
+            Span::raw("Next tab"),
+        ]),
+        Line::from(vec![
+            Span::styled("^T p  ", key_style),
+            Span::raw("Previous tab"),
+        ]),
+        Line::from(vec![
+            Span::styled("^T x  ", key_style),
+            Span::raw("Close current tab"),
+        ]),
+        Line::from(vec![
+            Span::styled("^T ^T ", key_style),
+            Span::raw("Send literal ^T"),
+        ]),
     ];
 
     frame.render_widget(Paragraph::new(text).block(block), area);
@@ -296,7 +374,7 @@ fn render_groups_pane(frame: &mut Frame, app: &App, area: Rect) {
             " e ".into(),
             "Rename".blue().bold(),
             " d ".into(),
-            "Del".blue().bold(),
+            "Del ".blue().bold(),
         ])
     } else {
         Line::default()
@@ -342,14 +420,16 @@ fn render_host_list(frame: &mut Frame, app: &App, area: Rect) {
 
     let instructions = if focused {
         Line::from(vec![
-            " ⏎ ".into(),
+            " Enter ".into(),
             "Connect".blue().bold(),
+            " t ".into(),
+            "Test".blue().bold(),
             " a ".into(),
             "Add".blue().bold(),
             " e ".into(),
             "Edit".blue().bold(),
             " d ".into(),
-            "Del".blue().bold(),
+            "Del ".blue().bold(),
         ])
     } else {
         Line::default()
