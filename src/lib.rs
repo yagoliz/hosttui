@@ -1,10 +1,7 @@
 pub mod app;
 pub mod error;
-pub mod keys;
 pub mod model;
-pub mod pty;
 pub mod ssh;
 pub mod sshconfig;
 pub mod storage;
-pub mod terminal_widget;
 pub mod ui;
