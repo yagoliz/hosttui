@@ -852,7 +852,7 @@ impl App {
             self.switch_to_session(idx);
             return;
         }
-        match Session::spawn(&mut host, rows, cols) {
+        match Session::spawn(&host, rows, cols) {
             Ok(session) => {
                 host.update_last_accessed();
                 let alias = host.alias.clone();
