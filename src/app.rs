@@ -5,7 +5,7 @@ use tui_input::Input;
 use std::sync::atomic::Ordering;
 
 use crate::model::{Config, Host};
-use crate::pty::Session;
+use crate::pty::{Session, SessionStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pane {
@@ -850,6 +850,30 @@ impl App {
 
     pub fn switch_to_hosts(&mut self) {
         self.view = View::Hosts;
+    }
+
+    pub fn close_exited_sessions(&mut self) {
+        let mut i = 0;
+        while i < self.sessions.len() {
+            if matches!(self.sessions[i].status(), SessionStatus::Exited(_)) {
+                self.sessions.remove(i);
+                match self.view {
+                    View::Session(idx) if idx == i => {
+                        if self.sessions.is_empty() {
+                            self.view = View::Hosts;
+                        } else if i >= self.sessions.len() {
+                            self.view = View::Session(self.sessions.len() - 1);
+                        }
+                    }
+                    View::Session(idx) if idx > i => {
+                        self.view = View::Session(idx - 1);
+                    }
+                    _ => {}
+                }
+            } else {
+                i += 1;
+            }
+        }
     }
 
     pub fn close_current_session(&mut self) {

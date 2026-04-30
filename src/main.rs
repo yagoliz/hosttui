@@ -247,6 +247,7 @@ fn run(
         for session in &mut app.sessions {
             session.update_status();
         }
+        app.close_exited_sessions();
 
         terminal.draw(|frame| ui::render(frame, app))?;
 
