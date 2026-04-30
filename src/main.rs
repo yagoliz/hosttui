@@ -98,7 +98,7 @@ fn handle_hosts_key(
                 KeyCode::Left => app.group_focus(),
                 KeyCode::Enter if app.focus == Pane::Hosts => {
                     let (cols, rows) = crossterm::terminal::size()?;
-                    app.open_session(rows.saturating_sub(1), cols);
+                    app.open_session(rows.saturating_sub(3), cols.saturating_sub(2));
                 }
                 KeyCode::Char('a') if app.focus == Pane::Hosts => app.start_adding(),
                 KeyCode::Char('e') if app.focus == Pane::Hosts => app.start_editing(),
@@ -274,13 +274,13 @@ fn run(
         let ev = event::read()?;
 
         if let Event::Resize(cols, rows) = ev {
-            let session_rows = if app.has_active_sessions() {
-                rows.saturating_sub(1)
+            let (session_rows, session_cols) = if app.has_active_sessions() {
+                (rows.saturating_sub(3), cols.saturating_sub(2))
             } else {
-                rows
+                (rows, cols)
             };
             for session in &app.sessions {
-                session.resize(session_rows, cols);
+                session.resize(session_rows, session_cols);
             }
             continue;
         }

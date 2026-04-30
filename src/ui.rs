@@ -93,22 +93,34 @@ fn render_session_view(frame: &mut Frame, app: &App, idx: usize, area: Rect) {
     let screen = session.screen();
     let is_dead = matches!(session.status(), SessionStatus::Exited(_));
 
-    frame.render_widget(TerminalView::new(&screen), area);
+    let border_style = if is_dead {
+        Style::default().fg(Color::Red)
+    } else {
+        Style::default().fg(Color::Cyan)
+    };
+    let block = Block::bordered()
+        .title(Line::from(format!(" {} ", session.alias).bold()).centered())
+        .border_set(border::ROUNDED)
+        .border_style(border_style);
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    frame.render_widget(TerminalView::new(&screen), inner);
 
     if !is_dead && !screen.hide_cursor() {
         let (cursor_row, cursor_col) = screen.cursor_position();
-        let x = area.x + cursor_col;
-        let y = area.y + cursor_row;
-        if x < area.x + area.width && y < area.y + area.height {
+        let x = inner.x + cursor_col;
+        let y = inner.y + cursor_row;
+        if x < inner.x + inner.width && y < inner.y + inner.height {
             frame.set_cursor_position(Position::new(x, y));
         }
     }
 
     if is_dead {
         let overlay_area = Rect {
-            x: area.x,
-            y: area.y + area.height.saturating_sub(1),
-            width: area.width,
+            x: inner.x,
+            y: inner.y + inner.height.saturating_sub(1),
+            width: inner.width,
             height: 1,
         };
         let line = Line::from(vec![
