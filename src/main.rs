@@ -99,6 +99,10 @@ fn handle_hosts_key(
                 KeyCode::Enter if app.focus == Pane::Hosts => {
                     let (cols, rows) = crossterm::terminal::size()?;
                     app.open_session(rows.saturating_sub(3), cols.saturating_sub(2));
+                    if app.dirty {
+                        persist(path, &app.config)?;
+                        app.dirty = false;
+                    }
                 }
                 KeyCode::Char('a') if app.focus == Pane::Hosts => app.start_adding(),
                 KeyCode::Char('e') if app.focus == Pane::Hosts => app.start_editing(),

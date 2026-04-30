@@ -233,9 +233,7 @@ fn render_test_result(frame: &mut Frame, alias: &str, status: &TestStatus) {
         TestStatus::Testing => {
             let block = Block::bordered()
                 .title(Line::from(" Testing Connection ".bold()).centered())
-                .title_bottom(
-                    Line::from(vec![" Esc ".into(), "Cancel".blue().bold()]).centered(),
-                )
+                .title_bottom(Line::from(vec![" Esc ".into(), "Cancel".blue().bold()]).centered())
                 .border_set(border::THICK)
                 .border_style(Style::default().fg(Color::Yellow));
 
@@ -478,6 +476,11 @@ fn render_detail(frame: &mut Frame, app: &App, area: Rect) {
     lines.push(Line::from(vec![
         label("Comments"),
         Span::raw(&host.details),
+    ]));
+
+    lines.push(Line::from(vec![
+        label("Last Accessed"),
+        Span::raw(&host.last_accessed),
     ]));
 
     let detail = Paragraph::new(lines).block(block);

@@ -66,6 +66,7 @@ mod tests {
             group: group.map(Into::into),
             extra: vec![],
             details: "".into(),
+            last_accessed: "".into(),
         }
     }
 
