@@ -1,6 +1,9 @@
 use std::collections::HashSet;
 
+use chrono::prelude::*;
 use serde::{Deserialize, Serialize};
+
+const DATE_FORMAT: &str = "%FT%H:%M:%S";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Host {
@@ -14,6 +17,15 @@ pub struct Host {
     pub extra: Vec<(String, String)>,
     #[serde(default)]
     pub details: String,
+    #[serde(default)]
+    pub last_accessed: String,
+}
+
+impl Host {
+    pub fn update_last_accessed(&mut self) {
+        let local = Local::now();
+        self.last_accessed = local.format(DATE_FORMAT).to_string();
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -119,6 +131,7 @@ mod tests {
             group: group.map(Into::into),
             extra: vec![],
             details: "Test host".into(),
+            last_accessed: "".into(),
         }
     }
 

@@ -53,21 +53,12 @@ impl Session {
             cmd.arg(arg);
         }
 
-        let child = pair
-            .slave
-            .spawn_command(cmd)
-            .map_err(io::Error::other)?;
+        let child = pair.slave.spawn_command(cmd).map_err(io::Error::other)?;
 
         drop(pair.slave);
 
-        let reader = pair
-            .master
-            .try_clone_reader()
-            .map_err(io::Error::other)?;
-        let writer = pair
-            .master
-            .take_writer()
-            .map_err(io::Error::other)?;
+        let reader = pair.master.try_clone_reader().map_err(io::Error::other)?;
+        let writer = pair.master.take_writer().map_err(io::Error::other)?;
 
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
         let exited = Arc::new(AtomicBool::new(false));
@@ -141,9 +132,7 @@ impl Session {
         }
         if self.exited.load(Ordering::SeqCst) {
             self.status = match self.child.try_wait() {
-                Ok(Some(es)) => {
-                    SessionStatus::Exited(if es.success() { Some(0) } else { Some(1) })
-                }
+                Ok(Some(es)) => SessionStatus::Exited(if es.success() { Some(0) } else { Some(1) }),
                 _ => SessionStatus::Exited(None),
             };
         } else if let Ok(Some(es)) = self.child.try_wait() {

@@ -118,6 +118,7 @@ pub struct FormState {
     pub error: Option<String>,
     pub extras: Vec<(String, String)>,
     pub extras_editor: Option<ExtrasEditor>,
+    last_accessed: String,
 }
 
 impl FormState {
@@ -136,6 +137,7 @@ impl FormState {
             error: None,
             extras: vec![],
             extras_editor: None,
+            last_accessed: String::new(),
         }
     }
 
@@ -166,6 +168,7 @@ impl FormState {
             error: None,
             extras: host.extra.clone(),
             extras_editor: None,
+            last_accessed: host.last_accessed.clone(),
         }
     }
 
@@ -342,6 +345,7 @@ impl FormState {
             group,
             details,
             extra: self.extras.clone(),
+            last_accessed: self.last_accessed.clone(),
         })
     }
 }
@@ -841,7 +845,7 @@ impl App {
     }
 
     pub fn open_session(&mut self, rows: u16, cols: u16) {
-        let Some(host) = self.selected_host().cloned() else {
+        let Some(mut host) = self.selected_host().cloned() else {
             return;
         };
         if let Some(idx) = self.find_session_by_alias(&host.alias) {
@@ -850,6 +854,10 @@ impl App {
         }
         match Session::spawn(&host, rows, cols) {
             Ok(session) => {
+                host.update_last_accessed();
+                let alias = host.alias.clone();
+                self.config.update_host(&alias, host);
+                self.dirty = true;
                 self.sessions.push(session);
                 self.switch_to_session(self.sessions.len() - 1);
             }

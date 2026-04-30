@@ -94,6 +94,7 @@ mod tests {
             group: group.map(Into::into),
             extra: vec![],
             details: "".into(),
+            last_accessed: "".into(),
         }
     }
 
@@ -137,6 +138,7 @@ mod tests {
                 group: None,
                 extra: vec![("ForwardAgent".into(), "yes".into())],
                 details: "".into(),
+                last_accessed: "".into(),
             }],
             vec![],
         );
