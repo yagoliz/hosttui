@@ -35,11 +35,4 @@ pub enum Error {
         #[source]
         source: std::io::Error,
     },
-
-    #[error("PTY error for '{alias}'")]
-    Pty {
-        alias: String,
-        #[source]
-        source: std::io::Error,
-    },
 }
