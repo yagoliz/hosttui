@@ -7,31 +7,30 @@ use ratatui::{
     widgets::{Block, Clear, List, ListItem, ListState, Paragraph},
 };
 
+use std::sync::atomic::Ordering;
+
 use crate::app::{
-    self, App, ExtraField, ExtrasEditor, FormState, GroupEntry, InputState, Mode, Pane,
+    self, App, ExtraField, ExtrasEditor, FormState, GroupEntry, InputState, Mode, Pane, PrefixState,
+    View,
 };
+use crate::pty::SessionStatus;
+use crate::terminal_widget::TerminalView;
 
 pub fn render(frame: &mut Frame, app: &App) {
-    let show_search_bar = matches!(app.mode, Mode::Searching) || !app.search.value().is_empty();
-    let [main_area, search_area] = Layout::vertical([
+    let has_tabs = app.has_active_sessions();
+    let [main_area, tab_bar_area] = Layout::vertical([
         Constraint::Min(1),
-        Constraint::Length(if show_search_bar { 1 } else { 0 }),
+        Constraint::Length(if has_tabs { 1 } else { 0 }),
     ])
     .areas(frame.area());
 
-    let [groups_area, hosts_area, detail_area] = Layout::horizontal([
-        Constraint::Percentage(33),
-        Constraint::Percentage(33),
-        Constraint::Percentage(34),
-    ])
-    .areas(main_area);
+    match app.view {
+        View::Hosts => render_hosts_view(frame, app, main_area),
+        View::Session(idx) => render_session_view(frame, app, idx, main_area),
+    }
 
-    render_groups_pane(frame, app, groups_area);
-    render_host_list(frame, app, hosts_area);
-    render_detail(frame, app, detail_area);
-
-    if show_search_bar {
-        render_search_bar(frame, app, search_area);
+    if has_tabs {
+        render_tab_bar(frame, app, tab_bar_area);
     }
 
     match &app.mode {
@@ -57,27 +56,137 @@ pub fn render(frame: &mut Frame, app: &App) {
         ),
         Mode::AddingGroup(input) => render_group_input(frame, "New Group", input),
         Mode::EditingGroup { input, .. } => render_group_input(frame, "Rename Group", input),
-        Mode::Connecting { alias } => render_connecting(frame, alias),
         Mode::ConnectError { alias, message } => render_connect_error(frame, alias, message),
+        Mode::TabHelp => render_tab_help(frame),
         Mode::Normal | Mode::Searching => {}
     }
 }
 
-fn render_connecting(frame: &mut Frame, alias: &str) {
-    let area = centered_rect(50, 5, frame.area());
-    frame.render_widget(Clear, area);
+fn render_hosts_view(frame: &mut Frame, app: &App, area: Rect) {
+    let show_search_bar = matches!(app.mode, Mode::Searching) || !app.search.value().is_empty();
+    let [main_area, search_area] = Layout::vertical([
+        Constraint::Min(1),
+        Constraint::Length(if show_search_bar { 1 } else { 0 }),
+    ])
+    .areas(area);
 
-    let block = Block::bordered()
-        .title(Line::from(" Connecting ".bold()).centered())
-        .title_bottom(Line::from(vec![" Esc ".into(), "Cancel".blue().bold()]).centered())
-        .border_set(border::THICK);
+    let [groups_area, hosts_area, detail_area] = Layout::horizontal([
+        Constraint::Percentage(33),
+        Constraint::Percentage(33),
+        Constraint::Percentage(34),
+    ])
+    .areas(main_area);
 
-    let text = vec![
-        Line::default(),
-        Line::from(format!("Connecting to '{alias}'...")).centered(),
-    ];
+    render_groups_pane(frame, app, groups_area);
+    render_host_list(frame, app, hosts_area);
+    render_detail(frame, app, detail_area);
 
-    frame.render_widget(Paragraph::new(text).block(block), area);
+    if show_search_bar {
+        render_search_bar(frame, app, search_area);
+    }
+}
+
+fn render_session_view(frame: &mut Frame, app: &App, idx: usize, area: Rect) {
+    let Some(session) = app.sessions.get(idx) else {
+        return;
+    };
+    let screen = session.screen();
+    let is_dead = matches!(session.status(), SessionStatus::Exited(_));
+
+    frame.render_widget(TerminalView::new(&screen), area);
+
+    if !is_dead && !screen.hide_cursor() {
+        let (cursor_row, cursor_col) = screen.cursor_position();
+        let x = area.x + cursor_col;
+        let y = area.y + cursor_row;
+        if x < area.x + area.width && y < area.y + area.height {
+            frame.set_cursor_position(Position::new(x, y));
+        }
+    }
+
+    if is_dead {
+        let overlay_area = Rect {
+            x: area.x,
+            y: area.y + area.height.saturating_sub(1),
+            width: area.width,
+            height: 1,
+        };
+        let line = Line::from(vec![
+            Span::styled(
+                " [disconnected] ",
+                Style::default()
+                    .fg(Color::Red)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Ctrl+T x to close", Style::default().fg(Color::DarkGray)),
+        ]);
+        frame.render_widget(Paragraph::new(line), overlay_area);
+    }
+}
+
+fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
+    let mut spans = Vec::new();
+
+    let hosts_style = if matches!(app.view, View::Hosts) {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    spans.push(Span::styled(" Hosts ", hosts_style));
+
+    for (i, session) in app.sessions.iter().enumerate() {
+        spans.push(Span::raw(" "));
+        let is_active = matches!(app.view, View::Session(idx) if idx == i);
+        let is_dead = matches!(session.status(), SessionStatus::Exited(_));
+        let has_unread = session.unread.load(Ordering::SeqCst);
+
+        let label = if let SessionStatus::Exited(code) = session.status() {
+            let code_str = code.map_or("?".into(), |c| c.to_string());
+            format!(" {}:{} [{}] ", i + 1, session.alias, code_str)
+        } else {
+            format!(" {}:{} ", i + 1, session.alias)
+        };
+
+        let style = if is_active {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else if is_dead {
+            Style::default().fg(Color::DarkGray)
+        } else if has_unread {
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        spans.push(Span::styled(label, style));
+    }
+
+    if matches!(app.prefix, PrefixState::Pending) {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            "^T-",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    let used: usize = spans.iter().map(|s| s.width()).sum();
+    let hint = "^T ? help";
+    let hint_width = hint.len();
+    if area.width as usize > used + hint_width + 1 {
+        let pad = area.width as usize - used - hint_width;
+        spans.push(Span::raw(" ".repeat(pad)));
+        spans.push(Span::styled(hint, Style::default().fg(Color::DarkGray)));
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_connect_error(frame: &mut Frame, alias: &str, message: &str) {
@@ -97,6 +206,29 @@ fn render_connect_error(frame: &mut Frame, alias: &str, message: &str) {
             message.to_string(),
             Style::default().fg(Color::Red),
         )),
+    ];
+
+    frame.render_widget(Paragraph::new(text).block(block), area);
+}
+
+fn render_tab_help(frame: &mut Frame) {
+    let area = centered_rect(40, 11, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::bordered()
+        .title(Line::from(" Tab Keys ".bold()).centered())
+        .title_bottom(Line::from(vec![" any key ".into(), "Dismiss".blue().bold()]).centered())
+        .border_set(border::THICK)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let key_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    let text = vec![
+        Line::from(vec![Span::styled("^T h  ", key_style), Span::raw("Switch to hosts")]),
+        Line::from(vec![Span::styled("^T 1-9", key_style), Span::raw(" Switch to tab N")]),
+        Line::from(vec![Span::styled("^T n  ", key_style), Span::raw("Next tab")]),
+        Line::from(vec![Span::styled("^T p  ", key_style), Span::raw("Previous tab")]),
+        Line::from(vec![Span::styled("^T x  ", key_style), Span::raw("Close current tab")]),
+        Line::from(vec![Span::styled("^T ^T ", key_style), Span::raw("Send literal ^T")]),
     ];
 
     frame.render_widget(Paragraph::new(text).block(block), area);
