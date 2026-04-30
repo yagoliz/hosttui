@@ -110,10 +110,11 @@ fn handle_hosts_key(
                     app.start_adding_group();
                 }
                 KeyCode::Char('/') => app.start_search(),
-                KeyCode::Char('t') if modifiers.contains(KeyModifiers::CONTROL) => {
-                    if app.has_active_sessions() {
-                        app.prefix = PrefixState::Pending;
-                    }
+                KeyCode::Char('t')
+                    if modifiers.contains(KeyModifiers::CONTROL)
+                        && app.has_active_sessions() =>
+                {
+                    app.prefix = PrefixState::Pending;
                 }
                 _ => {}
             }
