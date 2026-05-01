@@ -120,6 +120,29 @@ fn render_session_view(frame: &mut Frame, app: &App, idx: usize, area: Rect) {
         }
     }
 
+    let scrollback = session.scrollback_pos();
+    if scrollback > 0 {
+        let overlay_area = Rect {
+            x: inner.x,
+            y: inner.y + inner.height.saturating_sub(1),
+            width: inner.width,
+            height: 1,
+        };
+        let line = Line::from(vec![
+            Span::styled(
+                format!(" [{scrollback} lines up] "),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "scroll down or type to return",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]);
+        frame.render_widget(Paragraph::new(line), overlay_area);
+    }
+
     if is_dead {
         let overlay_area = Rect {
             x: inner.x,

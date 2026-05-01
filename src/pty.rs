@@ -60,7 +60,7 @@ impl Session {
         let reader = pair.master.try_clone_reader().map_err(io::Error::other)?;
         let writer = pair.master.take_writer().map_err(io::Error::other)?;
 
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 1000)));
         let exited = Arc::new(AtomicBool::new(false));
         let unread = Arc::new(AtomicBool::new(false));
 
@@ -106,7 +106,28 @@ impl Session {
     }
 
     pub fn write(&mut self, data: &[u8]) {
+        self.scroll_reset();
         let _ = self.writer.write_all(data);
+    }
+
+    pub fn scroll_up(&self, lines: usize) {
+        let mut parser = self.parser.lock().unwrap();
+        let current = parser.screen().scrollback();
+        parser.screen_mut().set_scrollback(current + lines);
+    }
+
+    pub fn scroll_down(&self, lines: usize) {
+        let mut parser = self.parser.lock().unwrap();
+        let current = parser.screen().scrollback();
+        parser.screen_mut().set_scrollback(current.saturating_sub(lines));
+    }
+
+    pub fn scroll_reset(&self) {
+        self.parser.lock().unwrap().screen_mut().set_scrollback(0);
+    }
+
+    pub fn scrollback_pos(&self) -> usize {
+        self.parser.lock().unwrap().screen().scrollback()
     }
 
     pub fn screen(&self) -> vt100::Screen {
