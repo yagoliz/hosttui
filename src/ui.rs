@@ -109,7 +109,8 @@ fn render_session_view(frame: &mut Frame, app: &App, idx: usize, area: Rect) {
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    frame.render_widget(TerminalView::new(&screen), inner);
+    let sel = app.selection.map(|s| s.normalized());
+    frame.render_widget(TerminalView::new(&screen).with_selection(sel), inner);
 
     if !is_dead && !screen.hide_cursor() {
         let (cursor_row, cursor_col) = screen.cursor_position();

@@ -5,14 +5,41 @@ use ratatui::{
     widgets::Widget,
 };
 
+use crate::app::ScreenPos;
+
 pub struct TerminalView<'a> {
     screen: &'a vt100::Screen,
+    selection: Option<(ScreenPos, ScreenPos)>,
 }
 
 impl<'a> TerminalView<'a> {
     pub fn new(screen: &'a vt100::Screen) -> Self {
-        Self { screen }
+        Self {
+            screen,
+            selection: None,
+        }
     }
+
+    pub fn with_selection(mut self, selection: Option<(ScreenPos, ScreenPos)>) -> Self {
+        self.selection = selection;
+        self
+    }
+}
+
+fn is_selected(row: u16, col: u16, start: &ScreenPos, end: &ScreenPos) -> bool {
+    if row < start.row || row > end.row {
+        return false;
+    }
+    if start.row == end.row {
+        return col >= start.col && col < end.col;
+    }
+    if row == start.row {
+        return col >= start.col;
+    }
+    if row == end.row {
+        return col < end.col;
+    }
+    true
 }
 
 impl Widget for TerminalView<'_> {
@@ -47,7 +74,14 @@ impl Widget for TerminalView<'_> {
                     modifiers |= Modifier::REVERSED;
                 }
 
-                let style = Style::default().fg(fg).bg(bg).add_modifier(modifiers);
+                let mut style = Style::default().fg(fg).bg(bg).add_modifier(modifiers);
+
+                if let Some((ref start, ref end)) = self.selection
+                    && is_selected(row, col, start, end)
+                {
+                    style = style.add_modifier(Modifier::REVERSED);
+                }
+
                 let contents = cell.contents();
 
                 if contents.is_empty() {
