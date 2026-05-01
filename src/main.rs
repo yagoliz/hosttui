@@ -1,7 +1,10 @@
 use std::path::Path;
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    MouseEventKind,
+};
 use tui_input::backend::crossterm::EventHandler;
 
 use hosttui::app::{App, Mode, Pane, PrefixState, View};
@@ -289,6 +292,29 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, path: &Path) -> a
             continue;
         }
 
+        if let Event::Mouse(mouse) = ev {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => match app.view {
+                    View::Hosts => {}
+                    View::Session(idx) => {
+                        if let Some(session) = app.sessions.get(idx) {
+                            session.scroll_up(3);
+                        }
+                    }
+                },
+                MouseEventKind::ScrollDown => match app.view {
+                    View::Hosts => {}
+                    View::Session(idx) => {
+                        if let Some(session) = app.sessions.get(idx) {
+                            session.scroll_down(3);
+                        }
+                    }
+                },
+                _ => {}
+            }
+            continue;
+        }
+
         if let Event::Key(key) = ev {
             if key.kind != KeyEventKind::Press {
                 continue;
@@ -309,7 +335,9 @@ fn main() -> anyhow::Result<()> {
     let mut app = App::new(config);
 
     let mut terminal = ratatui::init();
+    crossterm::execute!(std::io::stdout(), EnableMouseCapture)?;
     let result = run(&mut terminal, &mut app, &path);
+    let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     result
 }
