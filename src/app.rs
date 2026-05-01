@@ -31,7 +31,13 @@ impl Selection {
         } else {
             (self.end, self.anchor)
         };
-        (start, ScreenPos { row: end.row, col: end.col + 1 })
+        (
+            start,
+            ScreenPos {
+                row: end.row,
+                col: end.col + 1,
+            },
+        )
     }
 }
 
@@ -667,6 +673,12 @@ impl App {
             GroupEntry::Named(group_name) => {
                 self.mode = Mode::Adding(FormState::with_group(group_name))
             }
+        }
+    }
+
+    pub fn start_add_from_host(&mut self) {
+        if let Some(host) = self.selected_host().cloned() {
+            self.mode = Mode::Adding(FormState::from_host(&host))
         }
     }
 

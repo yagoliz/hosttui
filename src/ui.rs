@@ -450,6 +450,8 @@ fn render_host_list(frame: &mut Frame, app: &App, area: Rect) {
             "Add".blue().bold(),
             " e ".into(),
             "Edit".blue().bold(),
+            " c ".into(),
+            "Clone".blue().bold(),
             " d ".into(),
             "Del ".blue().bold(),
         ])
