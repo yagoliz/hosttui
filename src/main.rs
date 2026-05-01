@@ -3,11 +3,12 @@ use std::time::Duration;
 
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-    MouseEventKind,
+    MouseButton, MouseEventKind,
 };
+use ratatui::layout::Rect;
 use tui_input::backend::crossterm::EventHandler;
 
-use hosttui::app::{App, Mode, Pane, PrefixState, View};
+use hosttui::app::{App, Mode, Pane, PrefixState, ScreenPos, Selection, View};
 use hosttui::keys;
 use hosttui::model::Config;
 use hosttui::sshconfig;
@@ -221,7 +222,73 @@ fn handle_hosts_key(
     Ok(())
 }
 
+fn session_inner_rect(cols: u16, rows: u16, has_tabs: bool) -> Rect {
+    let tab_h = if has_tabs { 1u16 } else { 0 };
+    Rect {
+        x: 1,
+        y: 1,
+        width: cols.saturating_sub(2),
+        height: rows.saturating_sub(2 + tab_h),
+    }
+}
+
+fn frame_to_screen(col: u16, row: u16, inner: Rect) -> Option<ScreenPos> {
+    if col >= inner.x
+        && col < inner.x + inner.width
+        && row >= inner.y
+        && row < inner.y + inner.height
+    {
+        Some(ScreenPos {
+            row: row - inner.y,
+            col: col - inner.x,
+        })
+    } else {
+        None
+    }
+}
+
+fn frame_to_screen_clamped(col: u16, row: u16, inner: Rect) -> ScreenPos {
+    ScreenPos {
+        col: col
+            .max(inner.x)
+            .min(inner.x + inner.width.saturating_sub(1))
+            - inner.x,
+        row: row
+            .max(inner.y)
+            .min(inner.y + inner.height.saturating_sub(1))
+            - inner.y,
+    }
+}
+
+fn copy_selection(app: &mut App) {
+    let Some(sel) = app.selection else { return };
+    let (start, end) = sel.normalized();
+    if start == end {
+        return;
+    }
+    if let View::Session(idx) = app.view
+        && let Some(session) = app.sessions.get(idx)
+    {
+        let screen = session.screen();
+        let text = screen.contents_between(start.row, start.col, end.row, end.col);
+        if !text.is_empty()
+            && let Ok(mut clipboard) = arboard::Clipboard::new()
+        {
+            let _ = clipboard.set_text(text);
+        }
+    }
+    app.clear_selection();
+}
+
 fn handle_session_key(app: &mut App, key: &crossterm::event::KeyEvent) {
+    if key.code == KeyCode::Char('c')
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && app.selection.is_some()
+    {
+        copy_selection(app);
+        return;
+    }
+    app.clear_selection();
     if matches!(app.mode, Mode::TabHelp) {
         app.cancel_mode();
         return;
@@ -297,6 +364,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, path: &Path) -> a
                 MouseEventKind::ScrollUp => match app.view {
                     View::Hosts => {}
                     View::Session(idx) => {
+                        app.clear_selection();
                         if let Some(session) = app.sessions.get(idx) {
                             session.scroll_up(3);
                         }
@@ -305,11 +373,44 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, path: &Path) -> a
                 MouseEventKind::ScrollDown => match app.view {
                     View::Hosts => {}
                     View::Session(idx) => {
+                        app.clear_selection();
                         if let Some(session) = app.sessions.get(idx) {
                             session.scroll_down(3);
                         }
                     }
                 },
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if matches!(app.view, View::Session(_)) {
+                        let (cols, rows) = crossterm::terminal::size()?;
+                        let inner = session_inner_rect(cols, rows, app.has_active_sessions());
+                        if let Some(pos) = frame_to_screen(mouse.column, mouse.row, inner) {
+                            app.selection = Some(Selection {
+                                anchor: pos,
+                                end: pos,
+                            });
+                        } else {
+                            app.clear_selection();
+                        }
+                    }
+                }
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    let has_tabs = app.has_active_sessions();
+                    if let Some(sel) = app.selection.as_mut() {
+                        let (cols, rows) = crossterm::terminal::size()?;
+                        let inner = session_inner_rect(cols, rows, has_tabs);
+                        sel.end = frame_to_screen_clamped(mouse.column, mouse.row, inner);
+                    }
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    if let Some(sel) = app.selection {
+                        let (cols, rows) = crossterm::terminal::size()?;
+                        let inner = session_inner_rect(cols, rows, app.has_active_sessions());
+                        app.selection = Some(Selection {
+                            anchor: sel.anchor,
+                            end: frame_to_screen_clamped(mouse.column, mouse.row, inner),
+                        });
+                    }
+                }
                 _ => {}
             }
             continue;

@@ -11,6 +11,31 @@ use crate::model::{Config, Host};
 use crate::pty::{Session, SessionStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScreenPos {
+    pub row: u16,
+    pub col: u16,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Selection {
+    pub anchor: ScreenPos,
+    pub end: ScreenPos,
+}
+
+impl Selection {
+    pub fn normalized(&self) -> (ScreenPos, ScreenPos) {
+        let (start, end) = if self.anchor.row < self.end.row
+            || (self.anchor.row == self.end.row && self.anchor.col <= self.end.col)
+        {
+            (self.anchor, self.end)
+        } else {
+            (self.end, self.anchor)
+        };
+        (start, ScreenPos { row: end.row, col: end.col + 1 })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pane {
     Groups,
     Hosts,
@@ -410,6 +435,7 @@ pub struct App {
     pub view: View,
     pub sessions: Vec<Session>,
     pub prefix: PrefixState,
+    pub selection: Option<Selection>,
     group_entries: Vec<GroupEntry>,
     items: Vec<ListItem>,
 }
@@ -436,6 +462,7 @@ impl App {
             view: View::Hosts,
             sessions: Vec::new(),
             prefix: PrefixState::Inactive,
+            selection: None,
             group_entries,
             items,
         }
@@ -1003,6 +1030,10 @@ impl App {
             View::Session(0) => self.switch_to_hosts(),
             View::Session(idx) => self.switch_to_session(idx - 1),
         }
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
     }
 
     pub fn find_session_by_alias(&self, alias: &str) -> Option<usize> {
