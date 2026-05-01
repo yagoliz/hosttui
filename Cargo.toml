@@ -23,6 +23,7 @@ ratatui = "0.30.0"
 serde = { version = "1.0.228", features = ["derive"] }
 thiserror = "2.0.18"
 toml = "1.1.2"
+textwrap = "0.16"
 tui-input = "0.15.3"
 vt100 = "0.16.2"
 

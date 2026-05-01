@@ -473,10 +473,26 @@ fn render_detail(frame: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(vec![label(key), Span::raw(val)]));
     }
 
-    lines.push(Line::from(vec![
-        label("Comments"),
-        Span::raw(&host.details),
-    ]));
+    if !host.details.is_empty() {
+        let label_width: usize = 17; // "{key:>15}: " = 15 + 2
+        let content_width = (area.width as usize).saturating_sub(label_width + 2); // 2 for border
+        if content_width > 0 {
+            let wrapped = textwrap::wrap(&host.details, content_width);
+            for (i, chunk) in wrapped.iter().enumerate() {
+                if i == 0 {
+                    lines.push(Line::from(vec![
+                        label("Comments"),
+                        Span::raw(chunk.to_string()),
+                    ]));
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::raw(" ".repeat(label_width)),
+                        Span::raw(chunk.to_string()),
+                    ]));
+                }
+            }
+        }
+    }
 
     lines.push(Line::from(vec![
         label("Last Accessed"),
