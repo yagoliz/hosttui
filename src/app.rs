@@ -5,7 +5,7 @@ use tui_input::Input;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::model::{Config, Host};
 use crate::pty::{Session, SessionStatus};
@@ -442,6 +442,7 @@ pub struct App {
     pub sessions: Vec<Session>,
     pub prefix: PrefixState,
     pub selection: Option<Selection>,
+    clipboard_notice_until: Option<Instant>,
     group_entries: Vec<GroupEntry>,
     items: Vec<ListItem>,
 }
@@ -469,6 +470,7 @@ impl App {
             sessions: Vec::new(),
             prefix: PrefixState::Inactive,
             selection: None,
+            clipboard_notice_until: None,
             group_entries,
             items,
         }
@@ -1046,6 +1048,23 @@ impl App {
 
     pub fn clear_selection(&mut self) {
         self.selection = None;
+    }
+
+    pub fn show_clipboard_notice(&mut self) {
+        self.clipboard_notice_until = Some(Instant::now() + Duration::from_secs(2));
+    }
+
+    pub fn clear_expired_notifications(&mut self) {
+        if self
+            .clipboard_notice_until
+            .is_some_and(|until| Instant::now() >= until)
+        {
+            self.clipboard_notice_until = None;
+        }
+    }
+
+    pub fn clipboard_notice_visible(&self) -> bool {
+        self.clipboard_notice_until.is_some()
     }
 
     pub fn find_session_by_alias(&self, alias: &str) -> Option<usize> {
