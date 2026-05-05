@@ -110,6 +110,18 @@ impl Session {
         let _ = self.writer.write_all(data);
     }
 
+    pub fn paste(&mut self, text: &str) {
+        self.scroll_reset();
+        let bracketed_paste = self.parser.lock().unwrap().screen().bracketed_paste();
+        if bracketed_paste {
+            let _ = self.writer.write_all(b"\x1b[200~");
+        }
+        let _ = self.writer.write_all(text.as_bytes());
+        if bracketed_paste {
+            let _ = self.writer.write_all(b"\x1b[201~");
+        }
+    }
+
     pub fn scroll_up(&self, lines: usize) {
         let mut parser = self.parser.lock().unwrap();
         let current = parser.screen().scrollback();
@@ -119,7 +131,9 @@ impl Session {
     pub fn scroll_down(&self, lines: usize) {
         let mut parser = self.parser.lock().unwrap();
         let current = parser.screen().scrollback();
-        parser.screen_mut().set_scrollback(current.saturating_sub(lines));
+        parser
+            .screen_mut()
+            .set_scrollback(current.saturating_sub(lines));
     }
 
     pub fn scroll_reset(&self) {
