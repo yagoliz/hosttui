@@ -160,6 +160,25 @@ fn render_session_view(frame: &mut Frame, app: &App, idx: usize, area: Rect) {
         ]);
         frame.render_widget(Paragraph::new(line), overlay_area);
     }
+
+    if app.clipboard_notice_visible() && inner.width > 0 && inner.height > 0 {
+        let message = " Copied to clipboard ";
+        let overlay_area = Rect {
+            x: inner.x,
+            y: inner.y,
+            width: (message.len() as u16).min(inner.width),
+            height: 1,
+        };
+        let line = Line::from(Span::styled(
+            message,
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+        frame.render_widget(Clear, overlay_area);
+        frame.render_widget(Paragraph::new(line), overlay_area);
+    }
 }
 
 fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {

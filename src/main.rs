@@ -2,8 +2,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-    MouseButton, MouseEventKind,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton,
+    MouseEventKind,
 };
 use ratatui::layout::Rect;
 use tui_input::backend::crossterm::EventHandler;
@@ -261,10 +262,13 @@ fn frame_to_screen_clamped(col: u16, row: u16, inner: Rect) -> ScreenPos {
 
 fn copy_selection(app: &mut App) {
     let Some(sel) = app.selection else { return };
-    let (start, end) = sel.normalized();
-    if start == end {
+    if sel.anchor == sel.end {
+        app.clear_selection();
         return;
     }
+
+    let (start, end) = sel.normalized();
+    let mut copied = false;
     if let View::Session(idx) = app.view
         && let Some(session) = app.sessions.get(idx)
     {
@@ -273,20 +277,16 @@ fn copy_selection(app: &mut App) {
         if !text.is_empty()
             && let Ok(mut clipboard) = arboard::Clipboard::new()
         {
-            let _ = clipboard.set_text(text);
+            copied = clipboard.set_text(text).is_ok();
         }
     }
     app.clear_selection();
+    if copied {
+        app.show_clipboard_notice();
+    }
 }
 
 fn handle_session_key(app: &mut App, key: &crossterm::event::KeyEvent) {
-    if key.code == KeyCode::Char('c')
-        && key.modifiers.contains(KeyModifiers::CONTROL)
-        && app.selection.is_some()
-    {
-        copy_selection(app);
-        return;
-    }
     app.clear_selection();
     if matches!(app.mode, Mode::TabHelp) {
         app.cancel_mode();
@@ -325,12 +325,36 @@ fn handle_session_key(app: &mut App, key: &crossterm::event::KeyEvent) {
     }
 }
 
+fn paste_key(ch: char) -> KeyEvent {
+    let code = match ch {
+        '\n' | '\r' => KeyCode::Enter,
+        '\t' => KeyCode::Tab,
+        ch => KeyCode::Char(ch),
+    };
+    KeyEvent {
+        code,
+        modifiers: KeyModifiers::NONE,
+        kind: KeyEventKind::Press,
+        state: KeyEventState::NONE,
+    }
+}
+
+fn handle_hosts_paste(app: &mut App, text: &str, path: &Path) -> anyhow::Result<()> {
+    for ch in text.chars() {
+        let key = paste_key(ch);
+        let ev = Event::Key(key);
+        handle_hosts_key(app, &ev, key.code, key.modifiers, path)?;
+    }
+    Ok(())
+}
+
 fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, path: &Path) -> anyhow::Result<()> {
     while !app.exit {
         for session in &mut app.sessions {
             session.update_status();
         }
         app.close_exited_sessions();
+        app.clear_expired_notifications();
 
         terminal.draw(|frame| ui::render(frame, app))?;
 
@@ -408,9 +432,23 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, path: &Path) -> a
                             anchor: sel.anchor,
                             end: frame_to_screen_clamped(mouse.column, mouse.row, inner),
                         });
+                        copy_selection(app);
                     }
                 }
                 _ => {}
+            }
+            continue;
+        }
+
+        if let Event::Paste(text) = ev {
+            match app.view {
+                View::Hosts => handle_hosts_paste(app, &text, path)?,
+                View::Session(_) => {
+                    app.clear_selection();
+                    if let Some(session) = app.active_session_mut() {
+                        session.paste(&text);
+                    }
+                }
             }
             continue;
         }
@@ -435,9 +473,13 @@ fn main() -> anyhow::Result<()> {
     let mut app = App::new(config);
 
     let mut terminal = ratatui::init();
-    crossterm::execute!(std::io::stdout(), EnableMouseCapture)?;
+    crossterm::execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste)?;
     let result = run(&mut terminal, &mut app, &path);
-    let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        DisableBracketedPaste,
+        DisableMouseCapture
+    );
     ratatui::restore();
     result
 }
