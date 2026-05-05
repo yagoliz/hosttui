@@ -14,6 +14,12 @@ A terminal UI to manage SSH hosts: browse, organize in groups, and connect.
 
 ## Install
 
+### From [crates.io](https://crates.io)
+
+```
+cargo install hosttui
+```
+
 ### From source
 
 ```
