@@ -2,6 +2,7 @@ use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config as MatcherConfig, Matcher, Utf32Str};
 use tui_input::Input;
 
+use std::env;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -345,9 +346,11 @@ impl FormState {
         }
 
         let user = self.value(Field::User).trim().to_string();
-        if user.is_empty() {
-            return Err("User cannot be empty".into());
-        }
+        let user = if user.is_empty() {
+            env::var("USER").map_err(|e| e.to_string())?
+        } else {
+            user
+        };
 
         let port: u16 = self
             .value(Field::Port)
