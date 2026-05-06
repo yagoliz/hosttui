@@ -1,5 +1,11 @@
 use std::path::PathBuf;
 
+/// Error type used by library modules.
+///
+/// The binary converts these errors through `anyhow`, but library code keeps a
+/// structured enum so callers can inspect failure categories in tests and future
+/// UI flows. Path-carrying variants include the path that failed rather than
+/// relying only on the lower-level IO error message.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("failed to read config from {path}")]

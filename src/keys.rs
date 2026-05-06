@@ -1,5 +1,12 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+/// Encodes a crossterm key event into bytes understood by programs in a PTY.
+///
+/// Crossterm reports semantic key events, but a remote shell or TUI expects the
+/// same byte sequences it would receive from a real terminal. Printable
+/// characters become UTF-8, Ctrl-letter combinations become ASCII control bytes,
+/// Alt prefixes the character with ESC, and navigation/function keys use common
+/// ANSI/xterm escape sequences.
 pub fn encode(key: &KeyEvent) -> Option<Vec<u8>> {
     let mods = key.modifiers;
 

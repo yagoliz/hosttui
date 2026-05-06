@@ -16,6 +16,11 @@ use hosttui::sshconfig;
 use hosttui::storage;
 use hosttui::ui;
 
+/// Handles keys while the SSH extra-options sub-dialog is open.
+///
+/// The extras UI has two nested states: list navigation and key/value entry.
+/// This function routes keys to the appropriate state so the main host form
+/// handler does not need to understand the inner editor details.
 fn handle_extras_key(app: &mut App, ev: &Event, code: KeyCode) {
     let Some(form) = app.form_state_mut() else {
         return;
@@ -56,6 +61,10 @@ fn handle_extras_key(app: &mut App, ev: &Event, code: KeyCode) {
     }
 }
 
+/// Persists both hosttui's source config and the generated OpenSSH fragment.
+///
+/// App methods only set `dirty`; the event layer calls this after successful
+/// mutations so disk writes stay centralized and both files remain in sync.
 fn persist(path: &Path, config: &Config) -> anyhow::Result<()> {
     storage::save(path, config)?;
     let ssh_path = sshconfig::ssh_config_path()?;
@@ -63,6 +72,11 @@ fn persist(path: &Path, config: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Handles keyboard input while the host browser is active.
+///
+/// This covers normal navigation, search, modal forms, confirmations, and the
+/// Ctrl+T tab prefix when sessions exist. It persists immediately after actions
+/// that transition back to normal mode with dirty config.
 fn handle_hosts_key(
     app: &mut App,
     ev: &Event,
@@ -222,6 +236,11 @@ fn handle_hosts_key(
     Ok(())
 }
 
+/// Calculates the terminal-screen rectangle inside the session border and tabs.
+///
+/// Mouse events arrive in frame coordinates, while PTY selection and rendering
+/// use inner terminal coordinates. This helper mirrors the layout used by
+/// `ui::render_session_view` so selection math matches what the user sees.
 fn session_inner_rect(cols: u16, rows: u16, has_tabs: bool) -> Rect {
     let tab_h = if has_tabs { 1u16 } else { 0 };
     Rect {
@@ -232,6 +251,7 @@ fn session_inner_rect(cols: u16, rows: u16, has_tabs: bool) -> Rect {
     }
 }
 
+/// Converts a frame coordinate into a terminal-screen coordinate if it is inside.
 fn frame_to_screen(col: u16, row: u16, inner: Rect) -> Option<ScreenPos> {
     if col >= inner.x
         && col < inner.x + inner.width
@@ -247,6 +267,10 @@ fn frame_to_screen(col: u16, row: u16, inner: Rect) -> Option<ScreenPos> {
     }
 }
 
+/// Converts a frame coordinate into the nearest terminal-screen coordinate.
+///
+/// Drag selections should continue to update even if the mouse leaves the
+/// terminal area, so this clamps to the edge instead of returning `None`.
 fn frame_to_screen_clamped(col: u16, row: u16, inner: Rect) -> ScreenPos {
     ScreenPos {
         col: col
@@ -260,6 +284,11 @@ fn frame_to_screen_clamped(col: u16, row: u16, inner: Rect) -> ScreenPos {
     }
 }
 
+/// Copies the active terminal selection to the system clipboard.
+///
+/// The selection is read from the parsed vt100 screen, not from ratatui's frame
+/// buffer. After a successful copy the selection is cleared and a short-lived
+/// notification is shown in the session view.
 fn copy_selection(app: &mut App) {
     let Some(sel) = app.selection else { return };
     if sel.anchor == sel.end {
@@ -286,6 +315,11 @@ fn copy_selection(app: &mut App) {
     }
 }
 
+/// Handles keyboard input while an embedded SSH session is active.
+///
+/// Hosttui reserves Ctrl+T as a prefix for tab/session commands. All other keys
+/// are encoded into terminal bytes and forwarded to the active PTY. Pressing
+/// Ctrl+T twice sends a literal Ctrl+T to the remote program.
 fn handle_session_key(app: &mut App, key: &crossterm::event::KeyEvent) {
     app.clear_selection();
     if matches!(app.mode, Mode::TabHelp) {
@@ -325,6 +359,11 @@ fn handle_session_key(app: &mut App, key: &crossterm::event::KeyEvent) {
     }
 }
 
+/// Converts one pasted character into a synthetic key event for host forms.
+///
+/// `tui-input` consumes crossterm key events rather than raw paste strings, so
+/// host-view paste is replayed character-by-character through the normal key
+/// handling path. Session paste uses raw PTY paste handling instead.
 fn paste_key(ch: char) -> KeyEvent {
     let code = match ch {
         '\n' | '\r' => KeyCode::Enter,
@@ -339,6 +378,10 @@ fn paste_key(ch: char) -> KeyEvent {
     }
 }
 
+/// Replays pasted text through host-view key handling.
+///
+/// This preserves validation/error-clearing behavior because forms and search
+/// inputs see the same events they would receive from typed characters.
 fn handle_hosts_paste(app: &mut App, text: &str, path: &Path) -> anyhow::Result<()> {
     for ch in text.chars() {
         let key = paste_key(ch);
@@ -348,6 +391,12 @@ fn handle_hosts_paste(app: &mut App, text: &str, path: &Path) -> anyhow::Result<
     Ok(())
 }
 
+/// Main application event loop.
+///
+/// Each iteration refreshes runtime session state, draws a frame, then waits for
+/// terminal events. Active sessions use a short poll timeout so PTY output and
+/// transient notifications repaint smoothly even when the user is not pressing
+/// keys.
 fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, path: &Path) -> anyhow::Result<()> {
     while !app.exit {
         for session in &mut app.sessions {
@@ -467,6 +516,11 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, path: &Path) -> a
     Ok(())
 }
 
+/// Binary entry point.
+///
+/// Terminal setup and teardown are kept in one function so mouse capture,
+/// bracketed paste, and ratatui raw-screen state are restored even if `run`
+/// returns an error.
 fn main() -> anyhow::Result<()> {
     let path = storage::config_path()?;
     let config = storage::load(&path)?;

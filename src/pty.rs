@@ -10,6 +10,11 @@ use crate::ssh;
 
 type TerminalParser = vt100::Parser<TerminalCallbacks>;
 
+/// Runtime status for an embedded SSH session.
+///
+/// `Exited` stores a simplified exit code because `portable-pty` abstracts over
+/// platforms. A missing code means the child exited but the exact status was not
+/// available when polled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionStatus {
     Running,
@@ -25,6 +30,12 @@ impl std::fmt::Debug for Session {
     }
 }
 
+/// An embedded SSH process connected to a pseudo-terminal.
+///
+/// `Session` owns the PTY master, the `ssh` child process, a writer for user
+/// input, and a background reader thread that feeds output into a `vt100`
+/// parser. The parsed screen is cloned for rendering so UI code never reads
+/// directly from the PTY.
 pub struct Session {
     pub alias: String,
     master: Box<dyn MasterPty + Send>,
@@ -38,6 +49,11 @@ pub struct Session {
 }
 
 impl Session {
+    /// Spawns `ssh` for a host inside a newly-created PTY of the given size.
+    ///
+    /// The slave side becomes the controlling terminal for the OpenSSH child.
+    /// The master side stays in hosttui: writes send user input to SSH, and a
+    /// reader thread parses SSH output into the in-memory terminal screen.
     pub fn spawn(host: &Host, rows: u16, cols: u16) -> io::Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system
@@ -93,6 +109,12 @@ impl Session {
         })
     }
 
+    /// Continuously reads PTY output and applies it to the terminal parser.
+    ///
+    /// This runs on a background thread because terminal output can arrive even
+    /// when the main event loop is waiting for keyboard or mouse input. Any read
+    /// EOF/error marks the session as exited; the main loop later polls the child
+    /// process to update the public status.
     fn reader_loop(
         mut reader: Box<dyn Read + Send>,
         parser: Arc<Mutex<TerminalParser>>,
@@ -114,11 +136,21 @@ impl Session {
         }
     }
 
+    /// Sends raw bytes to the remote session and exits scrollback mode.
+    ///
+    /// Typing while scrolled up should behave like most terminal emulators: the
+    /// viewport snaps back to live output before input is delivered.
     pub fn write(&mut self, data: &[u8]) {
         self.scroll_reset();
         let _ = self.writer.lock().unwrap().write_all(data);
     }
 
+    /// Pastes text into the remote session, honoring bracketed paste mode.
+    ///
+    /// Full-screen programs can enable bracketed paste to distinguish pasted
+    /// text from typed keystrokes. When the parsed terminal state says that mode
+    /// is active, hosttui wraps the pasted bytes in the standard start/end paste
+    /// markers before writing them to the PTY.
     pub fn paste(&mut self, text: &str) {
         self.scroll_reset();
         let bracketed_paste = self.parser.lock().unwrap().screen().bracketed_paste();
@@ -132,12 +164,14 @@ impl Session {
         }
     }
 
+    /// Moves the terminal viewport up into vt100 scrollback history.
     pub fn scroll_up(&self, lines: usize) {
         let mut parser = self.parser.lock().unwrap();
         let current = parser.screen().scrollback();
         parser.screen_mut().set_scrollback(current + lines);
     }
 
+    /// Moves the terminal viewport down toward live output.
     pub fn scroll_down(&self, lines: usize) {
         let mut parser = self.parser.lock().unwrap();
         let current = parser.screen().scrollback();
@@ -146,18 +180,29 @@ impl Session {
             .set_scrollback(current.saturating_sub(lines));
     }
 
+    /// Returns the terminal viewport to live output.
     pub fn scroll_reset(&self) {
         self.parser.lock().unwrap().screen_mut().set_scrollback(0);
     }
 
+    /// Returns how many lines above live output the viewport currently is.
     pub fn scrollback_pos(&self) -> usize {
         self.parser.lock().unwrap().screen().scrollback()
     }
 
+    /// Returns a snapshot of the parsed terminal screen for rendering.
+    ///
+    /// The clone keeps rendering independent from the reader thread, which may
+    /// continue parsing new PTY bytes while ratatui draws the current frame.
     pub fn screen(&self) -> vt100::Screen {
         self.parser.lock().unwrap().screen().clone()
     }
 
+    /// Resizes both the in-memory parser screen and the OS PTY.
+    ///
+    /// Updating both sides is necessary: the parser needs the new dimensions to
+    /// render correctly, while the child process needs a PTY resize so programs
+    /// receive SIGWINCH and recalculate their layouts.
     pub fn resize(&self, rows: u16, cols: u16) {
         {
             let mut parser = self.parser.lock().unwrap();
@@ -171,6 +216,10 @@ impl Session {
         });
     }
 
+    /// Polls the child process and records a terminal `SessionStatus`.
+    ///
+    /// The method is non-blocking and safe to call every event-loop tick. Once a
+    /// session is no longer running, the cached status is left unchanged.
     pub fn update_status(&mut self) {
         if !matches!(self.status, SessionStatus::Running) {
             return;
@@ -185,6 +234,7 @@ impl Session {
         }
     }
 
+    /// Returns the last known child-process status.
     pub fn status(&self) -> SessionStatus {
         self.status
     }

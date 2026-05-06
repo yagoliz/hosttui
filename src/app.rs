@@ -11,12 +11,22 @@ use std::time::{Duration, Instant};
 use crate::model::{Config, Host};
 use crate::pty::{Session, SessionStatus};
 
+/// Zero-based coordinate inside a rendered terminal screen.
+///
+/// These coordinates are relative to the PTY viewport, not the outer ratatui
+/// frame. Mouse positions are converted into `ScreenPos` before selection text
+/// is read from `vt100::Screen`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScreenPos {
     pub row: u16,
     pub col: u16,
 }
 
+/// A mouse text selection in terminal-screen coordinates.
+///
+/// `anchor` is where the drag started and `end` is where it most recently ended.
+/// They are intentionally not normalized while dragging so the UI can support
+/// selecting in either direction.
 #[derive(Debug, Clone, Copy)]
 pub struct Selection {
     pub anchor: ScreenPos,
@@ -24,6 +34,11 @@ pub struct Selection {
 }
 
 impl Selection {
+    /// Returns the selection in top-left to bottom-right order.
+    ///
+    /// The returned end column is exclusive, matching `vt100::Screen` selection
+    /// APIs and the rendering helper. The stored `end` point is inclusive while
+    /// dragging, so this method adds one column after normalization.
     pub fn normalized(&self) -> (ScreenPos, ScreenPos) {
         let (start, end) = if self.anchor.row < self.end.row
             || (self.anchor.row == self.end.row && self.anchor.col <= self.end.col)
@@ -42,12 +57,18 @@ impl Selection {
     }
 }
 
+/// Which browser pane currently owns keyboard navigation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pane {
     Groups,
     Hosts,
 }
 
+/// Top-level view currently displayed by the app.
+///
+/// The host browser and SSH sessions share one event loop. `Session(usize)` is
+/// an index into `App::sessions`, so code that removes sessions must also adjust
+/// this view index to avoid pointing past the end of the vector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum View {
     #[default]
@@ -55,6 +76,10 @@ pub enum View {
     Session(usize),
 }
 
+/// State for the Ctrl+T session-command prefix.
+///
+/// Ctrl+T is intercepted by hosttui to switch tabs and close sessions. Pressing
+/// Ctrl+T twice sends a literal Ctrl+T to the remote session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PrefixState {
     #[default]
@@ -62,6 +87,10 @@ pub enum PrefixState {
     Pending,
 }
 
+/// Fields in the add/edit host form.
+///
+/// The order here matches `FormState::fields`, which lets the form navigate by
+/// index while still rendering stable labels for each row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
     Alias,
@@ -74,6 +103,7 @@ pub enum Field {
 }
 
 impl Field {
+    /// Returns the human-readable label used by the form renderer.
     pub fn label(self) -> &'static str {
         match self {
             Field::Alias => "Alias",
@@ -87,12 +117,19 @@ impl Field {
     }
 }
 
+/// Active input inside the SSH extra-option key/value editor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExtraField {
     Key,
     Value,
 }
 
+/// Nested form for adding or editing one SSH extra option.
+///
+/// Extra options are stored as key/value pairs and later exported as OpenSSH
+/// directives or passed to `ssh -o`. `editing_index` distinguishes a new pair
+/// from an edit of an existing pair so duplicate-key validation can ignore the
+/// pair currently being edited.
 #[derive(Debug, Clone)]
 pub struct ExtraEntryForm {
     pub key: Input,
@@ -103,6 +140,7 @@ pub struct ExtraEntryForm {
 }
 
 impl ExtraEntryForm {
+    /// Creates an empty key/value editor for a new SSH option.
     fn blank() -> Self {
         ExtraEntryForm {
             key: Input::default(),
@@ -112,6 +150,7 @@ impl ExtraEntryForm {
         }
     }
 
+    /// Creates a key/value editor prefilled from an existing SSH option.
     fn from_pair(index: usize, key: &str, value: &str) -> Self {
         ExtraEntryForm {
             key: Input::new(key.into()),
@@ -121,6 +160,7 @@ impl ExtraEntryForm {
         }
     }
 
+    /// Returns the currently focused input widget inside the nested editor.
     pub fn active_input(&mut self) -> &mut Input {
         match self.active {
             ExtraField::Key => &mut self.key,
@@ -128,6 +168,7 @@ impl ExtraEntryForm {
         }
     }
 
+    /// Moves focus between the key and value fields in the nested editor.
     pub fn toggle_field(&mut self) {
         self.active = match self.active {
             ExtraField::Key => ExtraField::Value,
@@ -136,6 +177,11 @@ impl ExtraEntryForm {
     }
 }
 
+/// State for the SSH extra-options sub-dialog.
+///
+/// The dialog can be in list mode (`entry == None`) or editing mode
+/// (`entry == Some`). Keeping both states in one struct lets the form retain the
+/// selected extra option while temporarily opening the inner entry form.
 #[derive(Debug, Clone, Default)]
 pub struct ExtrasEditor {
     pub selected: usize,
@@ -143,6 +189,12 @@ pub struct ExtrasEditor {
     pub error: Option<String>,
 }
 
+/// Mutable state for the add/edit host form.
+///
+/// The form stores raw `tui_input::Input` values until submission, when it is
+/// validated and converted into a `Host`. `last_accessed` is carried through
+/// edits but not shown as an editable field so editing a host does not reset its
+/// connection history.
 #[derive(Debug, Clone)]
 pub struct FormState {
     pub fields: [(Field, Input); 7],
@@ -154,6 +206,11 @@ pub struct FormState {
 }
 
 impl FormState {
+    /// Creates a new blank host form with sensible defaults.
+    ///
+    /// The default port is `22`, matching OpenSSH. The user field is left blank
+    /// here because `to_host` resolves it from the environment only at submit
+    /// time, after the user has had a chance to type a value.
     fn blank() -> Self {
         FormState {
             fields: [
@@ -173,12 +230,21 @@ impl FormState {
         }
     }
 
+    /// Creates a new host form prefilled with a selected group.
+    ///
+    /// This is used when the user is browsing a concrete group and starts adding
+    /// a host, reducing repetitive typing without changing validation rules.
     fn with_group(group: &str) -> Self {
         let mut form = Self::blank();
         form.fields[5].1 = Input::new(group.into());
         form
     }
 
+    /// Creates an edit form from an existing host record.
+    ///
+    /// All persisted fields are copied into editable inputs except
+    /// `last_accessed`, which is preserved privately so a save round-trip does
+    /// not lose connection-history metadata.
     fn from_host(host: &Host) -> Self {
         FormState {
             fields: [
@@ -204,16 +270,19 @@ impl FormState {
         }
     }
 
+    /// Opens the extra SSH options sub-dialog if it is not already open.
     pub fn open_extras(&mut self) {
         if self.extras_editor.is_none() {
             self.extras_editor = Some(ExtrasEditor::default());
         }
     }
 
+    /// Closes the extra SSH options sub-dialog and returns to the main form.
     pub fn close_extras(&mut self) {
         self.extras_editor = None;
     }
 
+    /// Returns mutable access to the extra-options editor when it is open.
     pub fn extras_editor_mut(&mut self) -> Option<&mut ExtrasEditor> {
         self.extras_editor.as_mut()
     }
@@ -237,6 +306,10 @@ impl FormState {
         }
     }
 
+    /// Deletes the selected extra SSH option from the form.
+    ///
+    /// After removal, the selected index is clamped to the final remaining item
+    /// so subsequent navigation/rendering never points past the vector.
     pub fn extras_delete_selected(&mut self) {
         let Some(ed) = self.extras_editor.as_mut() else {
             return;
@@ -249,6 +322,7 @@ impl FormState {
         }
     }
 
+    /// Moves the selected extra option down, wrapping at the end.
     pub fn extras_move_down(&mut self) {
         if let Some(ed) = self.extras_editor.as_mut()
             && !self.extras.is_empty()
@@ -257,6 +331,7 @@ impl FormState {
         }
     }
 
+    /// Moves the selected extra option up, wrapping at the beginning.
     pub fn extras_move_up(&mut self) {
         if let Some(ed) = self.extras_editor.as_mut()
             && !self.extras.is_empty()
@@ -313,18 +388,22 @@ impl FormState {
         }
     }
 
+    /// Returns the active input widget in the main host form.
     pub fn active_input(&mut self) -> &mut Input {
         &mut self.fields[self.active].1
     }
 
+    /// Advances focus to the next main host-form field, wrapping at the end.
     pub fn next_field(&mut self) {
         self.active = (self.active + 1) % self.fields.len();
     }
 
+    /// Moves focus to the previous main host-form field, wrapping at the start.
     pub fn prev_field(&mut self) {
         self.active = self.active.checked_sub(1).unwrap_or(self.fields.len() - 1);
     }
 
+    /// Reads the current raw string value for a named form field.
     fn value(&self, field: Field) -> &str {
         self.fields
             .iter()
@@ -334,6 +413,12 @@ impl FormState {
             .value()
     }
 
+    /// Validates the form and converts it into a persisted `Host` record.
+    ///
+    /// Empty alias and hostname values are rejected because they are required by
+    /// both hosttui and OpenSSH. An empty user falls back to `$USER`, matching
+    /// normal SSH behavior, and an empty identity/group becomes `None` so the
+    /// serialized TOML stays semantically clean.
     fn to_host(&self) -> Result<Host, String> {
         let alias = self.value(Field::Alias).trim().to_string();
         if alias.is_empty() {
@@ -390,12 +475,23 @@ pub struct InputState {
     pub error: Option<String>,
 }
 
+/// Result state for the asynchronous host reachability check.
+///
+/// The check runs on a background thread and updates this value through an
+/// `Arc<Mutex<_>>` stored in `Mode::TestResult`, allowing the main loop to keep
+/// rendering while the TCP connection attempt is in progress.
 #[derive(Debug, Clone)]
 pub enum TestStatus {
     Testing,
     Done { success: bool, message: String },
 }
 
+/// Current modal interaction state.
+///
+/// Most UI flows are represented here instead of by separate booleans. That
+/// keeps rendering and key handling explicit: the app is either in normal host
+/// browsing, editing a form, confirming a destructive action, showing a result,
+/// or displaying session tab help.
 #[derive(Debug, Clone, Default)]
 pub enum Mode {
     #[default]
@@ -424,6 +520,11 @@ pub enum Mode {
     TabHelp,
 }
 
+/// Entries shown in the group-navigation pane.
+///
+/// `All` and `Ungrouped` are virtual filters, while `Named` corresponds to a
+/// real persisted `Group`. Keeping the virtual entries in the same enum lets the
+/// group pane navigate all filters uniformly.
 #[derive(Debug, Clone)]
 pub enum GroupEntry {
     All,
@@ -431,6 +532,11 @@ pub enum GroupEntry {
     Ungrouped,
 }
 
+/// Central application state for rendering and event handling.
+///
+/// Rendering is intended to be a pure read of this struct; event handlers mutate
+/// it and set `dirty` whenever persisted config changes. Embedded SSH sessions
+/// live here as runtime-only state and are never serialized.
 #[derive(Debug)]
 pub struct App {
     pub config: Config,
@@ -450,6 +556,11 @@ pub struct App {
     items: Vec<ListItem>,
 }
 
+/// Row item displayed in the host list pane.
+///
+/// Group headers are selectable only visually; navigation skips over them when
+/// moving through hosts so actions like connect/edit/delete always target a
+/// `Host` item.
 #[derive(Debug, Clone)]
 pub enum ListItem {
     GroupHeader(String),
@@ -457,6 +568,11 @@ pub enum ListItem {
 }
 
 impl App {
+    /// Creates a new app state from loaded configuration.
+    ///
+    /// Derived lists are built immediately so the UI can render without doing
+    /// additional work, and selection starts on the first host item if one
+    /// exists rather than on a group header.
     pub fn new(config: Config) -> Self {
         let group_entries = Self::build_group_entries(&config);
         let items = Self::build_items(&config, &group_entries, 0, "");
@@ -479,6 +595,10 @@ impl App {
         }
     }
 
+    /// Builds the group-pane entries from persisted groups and current hosts.
+    ///
+    /// Group names are sorted for stable navigation. The virtual `Ungrouped`
+    /// entry is only shown when it would contain at least one host.
     fn build_group_entries(config: &Config) -> Vec<GroupEntry> {
         let mut entries = vec![GroupEntry::All];
         let mut group_names: Vec<_> = config.groups().iter().map(|g| g.name.clone()).collect();
@@ -492,6 +612,11 @@ impl App {
         entries
     }
 
+    /// Builds the host-list items for the active group filter or search query.
+    ///
+    /// Search mode ignores the group filter and ranks all hosts globally with
+    /// `nucleo-matcher`. Normal mode respects the selected group pane entry and
+    /// emits group headers only in the `All` view.
     fn build_items(
         config: &Config,
         group_entries: &[GroupEntry],
@@ -555,6 +680,10 @@ impl App {
         items
     }
 
+    /// Returns the index of the first host row, falling back to zero.
+    ///
+    /// The fallback keeps empty lists and header-only lists safe to render, while
+    /// callers still check `selected_host` before performing host actions.
     fn first_host_index(items: &[ListItem]) -> usize {
         items
             .iter()
@@ -562,6 +691,10 @@ impl App {
             .unwrap_or(0)
     }
 
+    /// Recomputes derived group and host lists after config or search changes.
+    ///
+    /// This method also repairs selection indexes that may have become invalid
+    /// after deletion, renaming, filtering, or group changes.
     pub fn rebuild(&mut self) {
         self.group_entries = Self::build_group_entries(&self.config);
         if self.group_selected >= self.group_entries.len() {
@@ -578,14 +711,17 @@ impl App {
         }
     }
 
+    /// Returns the current host-list rows for rendering.
     pub fn items(&self) -> &[ListItem] {
         &self.items
     }
 
+    /// Returns the current group-pane entries for rendering.
     pub fn group_entries(&self) -> &[GroupEntry] {
         &self.group_entries
     }
 
+    /// Returns the selected host, if the current row is a host row.
     pub fn selected_host(&self) -> Option<&Host> {
         match self.items.get(self.selected)? {
             ListItem::Host(alias) => self.config.find(alias),
@@ -593,6 +729,7 @@ impl App {
         }
     }
 
+    /// Toggles keyboard focus between the group pane and host pane.
     pub fn toggle_focus(&mut self) {
         self.focus = match self.focus {
             Pane::Groups => Pane::Hosts,
@@ -600,14 +737,21 @@ impl App {
         };
     }
 
+    /// Moves keyboard focus to the group pane.
     pub fn group_focus(&mut self) {
         self.focus = Pane::Groups;
     }
 
+    /// Moves keyboard focus to the host pane.
     pub fn host_focus(&mut self) {
         self.focus = Pane::Hosts;
     }
 
+    /// Moves selection down in the focused browser pane.
+    ///
+    /// Host navigation skips group-header rows; group navigation rebuilds the
+    /// host list for the newly selected group filter and resets host selection to
+    /// the first available host.
     pub fn move_down(&mut self) {
         match self.focus {
             Pane::Hosts => {
@@ -638,6 +782,10 @@ impl App {
         }
     }
 
+    /// Moves selection up in the focused browser pane.
+    ///
+    /// This mirrors `move_down`, including wrapping behavior and skipping
+    /// non-host rows in the host pane.
     pub fn move_up(&mut self) {
         match self.focus {
             Pane::Hosts => {
@@ -671,6 +819,10 @@ impl App {
         }
     }
 
+    /// Starts adding a host, optionally pre-filling the selected group.
+    ///
+    /// Adding from `All` or `Ungrouped` starts with no group. Adding while a real
+    /// group filter is selected pre-populates the group field with that name.
     pub fn start_adding(&mut self) {
         let group = &self.group_entries[self.group_selected];
         match group {
@@ -681,12 +833,21 @@ impl App {
         }
     }
 
+    /// Starts adding a host by cloning the currently selected host into a form.
+    ///
+    /// This is a convenience path for creating similar hosts. Validation during
+    /// submission still requires the user to change the alias if it would
+    /// duplicate an existing host.
     pub fn start_add_from_host(&mut self) {
         if let Some(host) = self.selected_host().cloned() {
             self.mode = Mode::Adding(FormState::from_host(&host))
         }
     }
 
+    /// Starts editing the currently selected host.
+    ///
+    /// The original alias is stored separately so the edit can rename the alias
+    /// while still updating the correct existing config entry on submit.
     pub fn start_editing(&mut self) {
         if let Some(host) = self.selected_host().cloned() {
             self.mode = Mode::Editing {
@@ -696,6 +857,11 @@ impl App {
         }
     }
 
+    /// Starts a delete confirmation for the focused item.
+    ///
+    /// Host focus confirms host deletion. Group focus confirms group deletion,
+    /// but only for real named groups; virtual entries like `All` and `Ungrouped`
+    /// cannot be deleted.
     pub fn start_delete(&mut self) {
         match self.focus {
             Pane::Hosts => {
@@ -711,10 +877,12 @@ impl App {
         }
     }
 
+    /// Starts the modal flow for creating a new group.
     pub fn start_adding_group(&mut self) {
         self.mode = Mode::AddingGroup(InputState::default());
     }
 
+    /// Starts the modal flow for renaming the selected real group.
     pub fn start_editing_group(&mut self) {
         if let Some(GroupEntry::Named(name)) = self.group_entries.get(self.group_selected) {
             self.mode = Mode::EditingGroup {
@@ -727,6 +895,11 @@ impl App {
         }
     }
 
+    /// Applies the currently pending delete confirmation.
+    ///
+    /// Deleting a group does not delete hosts; `Config::remove_group` moves them
+    /// back to ungrouped. Any successful delete marks the config dirty so the
+    /// event loop knows to persist it.
     pub fn confirm_delete(&mut self) {
         match &self.mode {
             Mode::ConfirmDelete(alias) => {
@@ -746,12 +919,22 @@ impl App {
         self.mode = Mode::Normal;
     }
 
+    /// Ensures a host's referenced group exists in the group list.
+    ///
+    /// Users can type a new group name directly into the host form. Rather than
+    /// forcing a separate group-create step, submission creates the group on
+    /// demand so the browser pane can render it afterward.
     fn ensure_host_group_exists(&mut self, host: &Host) {
         if let Some(ref group_name) = host.group {
             self.config.add_group(group_name);
         }
     }
 
+    /// Submits the active add/edit form and mutates config on success.
+    ///
+    /// Validation errors are written back into the active form state so the UI
+    /// can display them without losing the user's input. Successful config
+    /// mutations rebuild derived lists, set `dirty`, and return to normal mode.
     pub fn submit_form(&mut self) {
         let mode = self.mode.clone();
         match mode {
@@ -847,20 +1030,24 @@ impl App {
         }
     }
 
+    /// Leaves the current modal state without applying changes.
     pub fn cancel_mode(&mut self) {
         self.mode = Mode::Normal;
     }
 
+    /// Enters search mode and directs navigation focus to the host list.
     pub fn start_search(&mut self) {
         self.focus = Pane::Hosts;
         self.mode = Mode::Searching;
     }
 
+    /// Exits search input mode while keeping the current query applied.
     pub fn commit_search(&mut self) {
         // Exits the input mode but keeps the filter applied.
         self.mode = Mode::Normal;
     }
 
+    /// Clears the search query and rebuilds the unfiltered host list.
     pub fn cancel_search(&mut self) {
         // Drop the filter entirely and return to the normal view.
         self.search.reset();
@@ -869,11 +1056,13 @@ impl App {
         self.selected = Self::first_host_index(&self.items);
     }
 
+    /// Rebuilds host-list search results after the query changes.
     pub fn refresh_search(&mut self) {
         self.rebuild();
         self.selected = Self::first_host_index(&self.items);
     }
 
+    /// Returns the active host form when the current mode owns one.
     pub fn form_state_mut(&mut self) -> Option<&mut FormState> {
         match &mut self.mode {
             Mode::Adding(form) | Mode::Editing { form, .. } => Some(form),
@@ -881,6 +1070,7 @@ impl App {
         }
     }
 
+    /// Returns the active group-name input state when the current mode owns one.
     pub fn input_state_mut(&mut self) -> Option<&mut InputState> {
         match &mut self.mode {
             Mode::AddingGroup(input) | Mode::EditingGroup { input, .. } => Some(input),
@@ -888,6 +1078,11 @@ impl App {
         }
     }
 
+    /// Opens an embedded SSH session for the selected host.
+    ///
+    /// Existing sessions are de-duplicated by alias and switched to instead of
+    /// spawning another SSH process. Successful opens update `last_accessed`,
+    /// which is persisted through the normal dirty/config save path.
     pub fn open_session(&mut self, rows: u16, cols: u16) {
         let Some(mut host) = self.selected_host().cloned() else {
             return;
@@ -914,6 +1109,11 @@ impl App {
         }
     }
 
+    /// Starts a background TCP reachability check for the selected host.
+    ///
+    /// This tests whether the configured hostname and port accept a TCP
+    /// connection; it does not authenticate or run SSH. Results are posted back
+    /// through shared `TestStatus` so the main event loop remains responsive.
     pub fn test_host(&mut self) {
         let Some(host) = self.selected_host().cloned() else {
             return;
@@ -961,10 +1161,15 @@ impl App {
         });
     }
 
+    /// Switches back to the host browser view.
     pub fn switch_to_hosts(&mut self) {
         self.view = View::Hosts;
     }
 
+    /// Removes sessions whose child process has exited and repairs the active view.
+    ///
+    /// Session removal shifts indexes, so the active `View::Session` index must
+    /// be updated when a session before or at the active tab disappears.
     pub fn close_exited_sessions(&mut self) {
         let mut i = 0;
         while i < self.sessions.len() {
@@ -989,6 +1194,11 @@ impl App {
         }
     }
 
+    /// Closes the active session tab, killing its PTY child through `Session::drop`.
+    ///
+    /// After removal, focus moves to the next sensible tab: the previous last
+    /// session if the closed tab was at the end, or the host browser if no
+    /// sessions remain.
     pub fn close_current_session(&mut self) {
         let View::Session(idx) = self.view else {
             return;
@@ -1004,6 +1214,7 @@ impl App {
         }
     }
 
+    /// Switches to a session by index and clears its unread marker.
     pub fn switch_to_session(&mut self, idx: usize) {
         if idx < self.sessions.len() {
             self.view = View::Session(idx);
@@ -1011,6 +1222,7 @@ impl App {
         }
     }
 
+    /// Returns mutable access to the active session, if the session view is active.
     pub fn active_session_mut(&mut self) -> Option<&mut Session> {
         match self.view {
             View::Session(idx) => self.sessions.get_mut(idx),
@@ -1018,10 +1230,15 @@ impl App {
         }
     }
 
+    /// Returns true when at least one embedded SSH session is alive in the app.
     pub fn has_active_sessions(&self) -> bool {
         !self.sessions.is_empty()
     }
 
+    /// Moves to the next tab in the host/session tab ring.
+    ///
+    /// The host browser participates as a tab so repeated next-tab commands cycle
+    /// through sessions and then back to hosts.
     pub fn next_tab(&mut self) {
         if self.sessions.is_empty() {
             return;
@@ -1038,6 +1255,7 @@ impl App {
         }
     }
 
+    /// Moves to the previous tab in the host/session tab ring.
     pub fn prev_tab(&mut self) {
         if self.sessions.is_empty() {
             return;
@@ -1049,14 +1267,17 @@ impl App {
         }
     }
 
+    /// Clears any active terminal text selection.
     pub fn clear_selection(&mut self) {
         self.selection = None;
     }
 
+    /// Shows the transient "copied to clipboard" notice.
     pub fn show_clipboard_notice(&mut self) {
         self.clipboard_notice_until = Some(Instant::now() + Duration::from_secs(2));
     }
 
+    /// Clears transient notices whose deadline has passed.
     pub fn clear_expired_notifications(&mut self) {
         if self
             .clipboard_notice_until
@@ -1066,10 +1287,15 @@ impl App {
         }
     }
 
+    /// Returns whether the clipboard notice should currently be rendered.
     pub fn clipboard_notice_visible(&self) -> bool {
         self.clipboard_notice_until.is_some()
     }
 
+    /// Finds the session tab index for a host alias.
+    ///
+    /// Aliases are unique in config, so they also serve as a stable session
+    /// de-duplication key while the app is running.
     pub fn find_session_by_alias(&self, alias: &str) -> Option<usize> {
         self.sessions.iter().position(|s| s.alias == alias)
     }

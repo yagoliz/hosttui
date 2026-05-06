@@ -16,6 +16,10 @@ use crate::app::{
 use crate::pty::SessionStatus;
 use crate::terminal_widget::TerminalView;
 
+/// Renders the entire application for the current frame.
+///
+/// Rendering reads from `App` but does not mutate it. The base view is drawn
+/// first, then the tab bar and any active modal overlays are drawn on top.
 pub fn render(frame: &mut Frame, app: &App) {
     let has_tabs = app.has_active_sessions();
     let [main_area, tab_bar_area] = Layout::vertical([
@@ -66,6 +70,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
 }
 
+/// Renders the host-browser layout: groups, hosts, details, and optional search.
 fn render_hosts_view(frame: &mut Frame, app: &App, area: Rect) {
     let show_search_bar = matches!(app.mode, Mode::Searching) || !app.search.value().is_empty();
     let [main_area, search_area] = Layout::vertical([
@@ -90,6 +95,11 @@ fn render_hosts_view(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+/// Renders one embedded SSH session inside a bordered terminal panel.
+///
+/// The terminal contents come from a cloned `vt100::Screen`; overlays such as
+/// scrollback position, disconnect status, and clipboard notices are ratatui UI
+/// elements layered over the parsed terminal output.
 fn render_session_view(frame: &mut Frame, app: &App, idx: usize, area: Rect) {
     let Some(session) = app.sessions.get(idx) else {
         return;
@@ -181,6 +191,11 @@ fn render_session_view(frame: &mut Frame, app: &App, idx: usize, area: Rect) {
     }
 }
 
+/// Renders the bottom host/session tab bar.
+///
+/// Session tabs include unread and disconnected styling. The host browser is
+/// treated as the first tab in the navigation model, so it is rendered alongside
+/// session tabs instead of as a separate mode indicator.
 fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     let mut spans = Vec::new();
 
@@ -246,6 +261,7 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+/// Renders a connection-spawn error overlay.
 fn render_connect_error(frame: &mut Frame, alias: &str, message: &str) {
     let area = centered_rect(60, 7, frame.area());
     frame.render_widget(Clear, area);
@@ -268,6 +284,10 @@ fn render_connect_error(frame: &mut Frame, alias: &str, message: &str) {
     frame.render_widget(Paragraph::new(text).block(block), area);
 }
 
+/// Renders the asynchronous reachability-test status overlay.
+///
+/// The result is read from `TestStatus`, which may still be `Testing` while the
+/// background TCP probe is running.
 fn render_test_result(frame: &mut Frame, alias: &str, status: &TestStatus) {
     let area = centered_rect(60, 7, frame.area());
     frame.render_widget(Clear, area);
@@ -322,6 +342,7 @@ fn render_test_result(frame: &mut Frame, alias: &str, status: &TestStatus) {
     }
 }
 
+/// Renders the Ctrl+T tab-command help overlay.
 fn render_tab_help(frame: &mut Frame) {
     let area = centered_rect(40, 11, frame.area());
     frame.render_widget(Clear, area);
@@ -365,6 +386,7 @@ fn render_tab_help(frame: &mut Frame) {
     frame.render_widget(Paragraph::new(text).block(block), area);
 }
 
+/// Builds a consistently styled pane border that reflects focus state.
 fn pane_border(title: &str, focused: bool) -> Block<'_> {
     let style = if focused {
         Style::default().fg(Color::Cyan)
@@ -377,6 +399,7 @@ fn pane_border(title: &str, focused: bool) -> Block<'_> {
         .border_style(style)
 }
 
+/// Renders the group/filter navigation pane.
 fn render_groups_pane(frame: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Pane::Groups;
     let items: Vec<ListItem> = app
@@ -428,6 +451,10 @@ fn render_groups_pane(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_stateful_widget(list, area, &mut state);
 }
 
+/// Renders the host list for the active group filter or search query.
+///
+/// Header rows are visually distinct from host rows, matching the navigation
+/// behavior in `App` where headers are skipped for host actions.
 fn render_host_list(frame: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Pane::Hosts;
     let items: Vec<ListItem> = app
@@ -485,6 +512,10 @@ fn render_host_list(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_stateful_widget(list, area, &mut state);
 }
 
+/// Renders details for the currently selected host.
+///
+/// Long free-form comments are wrapped to fit the pane width while preserving
+/// alignment with the other key/value rows.
 fn render_detail(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::bordered()
         .title(Line::from(" Details ".bold()).centered())
@@ -548,6 +579,10 @@ fn render_detail(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(detail, area);
 }
 
+/// Returns a fixed-size rectangle centered within another rectangle.
+///
+/// Modal overlays use this helper so their layout remains independent from the
+/// main pane layout underneath.
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     let [area] = Layout::horizontal([Constraint::Length(width)])
         .flex(Flex::Center)
@@ -558,6 +593,10 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     area
 }
 
+/// Renders the add/edit host form overlay.
+///
+/// Cursor placement uses `tui-input`'s visual cursor so multi-byte characters
+/// and wide glyphs keep the terminal cursor aligned with displayed text.
 fn render_form(frame: &mut Frame, title: &str, form: &FormState) {
     let area = centered_rect(75, (form.fields.len() as u16) + 6, frame.area());
     frame.render_widget(Clear, area);
@@ -631,6 +670,7 @@ fn render_form(frame: &mut Frame, title: &str, form: &FormState) {
     }
 }
 
+/// Renders the add/rename group input overlay.
 fn render_group_input(frame: &mut Frame, title: &str, input: &InputState) {
     let height = if input.error.is_some() { 5 } else { 3 };
     let area = centered_rect(40, height, frame.area());
@@ -669,6 +709,7 @@ fn render_group_input(frame: &mut Frame, title: &str, input: &InputState) {
     }
 }
 
+/// Renders the search bar and places the cursor when search mode is active.
 fn render_search_bar(frame: &mut Frame, app: &App, area: Rect) {
     let active = matches!(app.mode, Mode::Searching);
     let prompt_style = if active {
@@ -703,6 +744,11 @@ fn render_search_bar(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+/// Renders the SSH extra-options list overlay.
+///
+/// If an inner key/value entry form is active, rendering is delegated to
+/// `render_extras_entry`; otherwise this draws the list of existing extras and
+/// any list-level validation error.
 fn render_extras(frame: &mut Frame, form: &FormState, ed: &ExtrasEditor) {
     if ed.entry.is_some() {
         render_extras_entry(frame, ed);
@@ -772,6 +818,7 @@ fn render_extras(frame: &mut Frame, form: &FormState, ed: &ExtrasEditor) {
     }
 }
 
+/// Renders the inner add/edit form for a single SSH extra option.
 fn render_extras_entry(frame: &mut Frame, ed: &ExtrasEditor) {
     let entry = ed.entry.as_ref().expect("entry must be set");
     let height = if ed.error.is_some() { 6 } else { 5 };
@@ -864,6 +911,7 @@ fn render_extras_entry(frame: &mut Frame, ed: &ExtrasEditor) {
     }
 }
 
+/// Renders a generic yes/no confirmation overlay.
 fn render_confirm(frame: &mut Frame, title: &str, message: &str) {
     let line_count = message.lines().count() as u16;
     let area = centered_rect(45, line_count + 4, frame.area());

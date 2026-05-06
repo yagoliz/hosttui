@@ -7,12 +7,18 @@ use ratatui::{
 
 use crate::app::ScreenPos;
 
+/// Ratatui widget that paints a parsed `vt100::Screen` into a frame area.
+///
+/// The PTY reader produces an in-memory terminal screen rather than writing
+/// directly to stdout. This widget bridges that representation into ratatui by
+/// copying each visible cell's text and style into the frame buffer.
 pub struct TerminalView<'a> {
     screen: &'a vt100::Screen,
     selection: Option<(ScreenPos, ScreenPos)>,
 }
 
 impl<'a> TerminalView<'a> {
+    /// Creates a terminal widget for a parsed screen snapshot.
     pub fn new(screen: &'a vt100::Screen) -> Self {
         Self {
             screen,
@@ -20,12 +26,22 @@ impl<'a> TerminalView<'a> {
         }
     }
 
+    /// Adds an optional normalized selection range to highlight while rendering.
+    ///
+    /// Selection coordinates are terminal-screen coordinates, not frame
+    /// coordinates. The range end is exclusive so it can be shared with
+    /// `vt100::Screen::contents_between`.
     pub fn with_selection(mut self, selection: Option<(ScreenPos, ScreenPos)>) -> Self {
         self.selection = selection;
         self
     }
 }
 
+/// Returns whether a terminal cell lies inside a normalized selection range.
+///
+/// `start` is inclusive and `end` is exclusive. Multi-line selections include
+/// every cell between the starting column on the first row and the ending column
+/// on the final row.
 fn is_selected(row: u16, col: u16, start: &ScreenPos, end: &ScreenPos) -> bool {
     if row < start.row || row > end.row {
         return false;
@@ -43,6 +59,11 @@ fn is_selected(row: u16, col: u16, start: &ScreenPos, end: &ScreenPos) -> bool {
 }
 
 impl Widget for TerminalView<'_> {
+    /// Renders visible terminal cells into ratatui's buffer.
+    ///
+    /// The widget clips to the smaller of the frame area and the parsed terminal
+    /// size. Empty terminal cells are drawn as spaces with their style so
+    /// background colors still appear correctly.
     fn render(self, area: Rect, buf: &mut Buffer) {
         let (screen_rows, screen_cols) = self.screen.size();
         let rows = area.height.min(screen_rows);
@@ -94,6 +115,10 @@ impl Widget for TerminalView<'_> {
     }
 }
 
+/// Converts a vt100 color into the equivalent ratatui color value.
+///
+/// `Color::Default` maps to `Reset` so ratatui leaves the terminal's default
+/// foreground/background in effect rather than forcing a specific color.
 fn convert_color(color: vt100::Color) -> Color {
     match color {
         vt100::Color::Default => Color::Reset,

@@ -4,11 +4,21 @@ use std::path::{Path, PathBuf};
 use crate::error::Error;
 use crate::model::Config;
 
+/// Returns the default hosttui persistence path under the user's config dir.
+///
+/// The app stores its own source of truth at this path and separately exports a
+/// generated OpenSSH include file. Keeping those files distinct prevents manual
+/// SSH config edits from being overwritten by hosttui saves.
 pub fn config_path() -> Result<PathBuf, Error> {
     let dir = dirs::config_dir().ok_or(Error::NoConfigDir)?;
     Ok(dir.join("hosttui").join("hosts.toml"))
 }
 
+/// Loads the persisted hosttui configuration from disk.
+///
+/// A missing file is treated as an empty configuration so first-run startup does
+/// not need a bootstrap file. Read and parse failures are reported with the path
+/// attached so the binary boundary can show actionable errors.
 pub fn load(path: &Path) -> Result<Config, Error> {
     if !path.exists() {
         return Ok(Config::new(vec![], vec![]));
@@ -25,6 +35,12 @@ pub fn load(path: &Path) -> Result<Config, Error> {
     })
 }
 
+/// Saves the hosttui configuration using a temp-file-and-rename write.
+///
+/// The real config file is never truncated before the new contents have been
+/// fully serialized and written. On filesystems where `rename` is atomic within
+/// a directory, readers should either see the previous complete file or the new
+/// complete file, not a partial write.
 pub fn save(path: &Path, config: &Config) -> Result<(), Error> {
     let contents = toml::to_string_pretty(config)?;
 

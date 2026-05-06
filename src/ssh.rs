@@ -1,5 +1,12 @@
 use crate::model::Host;
 
+/// Converts a `Host` record into command-line arguments for `ssh`.
+///
+/// The binary uses the system OpenSSH client inside an embedded PTY instead of
+/// implementing SSH itself. Options are emitted before the final destination
+/// argument, matching the order expected by `ssh`. Advanced per-host settings
+/// from `Host::extra` are passed as `-o key=value` so they work without needing
+/// to be present in the generated config fragment first.
 pub fn ssh_args(host: &Host) -> Vec<String> {
     let mut args = Vec::new();
 
