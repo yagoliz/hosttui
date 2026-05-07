@@ -90,8 +90,18 @@ pub fn handle_hosts_key(
                         app.cancel_search();
                     }
                 }
-                KeyCode::Char('j') | KeyCode::Down => app.move_down(),
-                KeyCode::Char('k') | KeyCode::Up => app.move_up(),
+                KeyCode::Char('j') | KeyCode::Down => {
+                    if app.focus == Pane::Groups {
+                        app.cancel_search()
+                    }
+                    app.move_down()
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    if app.focus == Pane::Groups {
+                        app.cancel_search()
+                    }
+                    app.move_up()
+                }
                 KeyCode::Tab => app.toggle_focus(),
                 KeyCode::Right => app.host_focus(),
                 KeyCode::Left => app.group_focus(),
