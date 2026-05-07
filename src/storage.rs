@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::Error;
 use crate::model::Config;
+use crate::sshconfig::{export, ssh_config_path};
 
 /// Returns the default hosttui persistence path under the user's config dir.
 ///
@@ -63,6 +64,17 @@ pub fn save(path: &Path, config: &Config) -> Result<(), Error> {
         source: e,
     })?;
 
+    Ok(())
+}
+
+/// Persists both hosttui's source config and the generated OpenSSH fragment.
+///
+/// App methods only set `dirty`; the event layer calls this after successful
+/// mutations so disk writes stay centralized and both files remain in sync.
+pub fn persist(path: &Path, config: &Config) -> anyhow::Result<()> {
+    save(path, config)?;
+    let ssh_path = ssh_config_path()?;
+    export(&ssh_path, config)?;
     Ok(())
 }
 

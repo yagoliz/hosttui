@@ -11,10 +11,58 @@ use std::sync::atomic::Ordering;
 
 use crate::app::{
     self, App, ExtraField, ExtrasEditor, FormState, GroupEntry, InputState, Mode, Pane,
-    PrefixState, TestStatus, View,
+    PrefixState, ScreenPos, TestStatus, View,
 };
 use crate::pty::SessionStatus;
 use crate::terminal_widget::TerminalView;
+
+/// Calculates the terminal-screen rectangle inside the session border and tabs.
+///
+/// Mouse events arrive in frame coordinates, while PTY selection and rendering
+/// use inner terminal coordinates. This helper mirrors the layout used by
+/// `ui::render_session_view` so selection math matches what the user sees.
+pub fn session_inner_rect(cols: u16, rows: u16, has_tabs: bool) -> Rect {
+    let tab_h = if has_tabs { 1u16 } else { 0 };
+    Rect {
+        x: 1,
+        y: 1,
+        width: cols.saturating_sub(2),
+        height: rows.saturating_sub(2 + tab_h),
+    }
+}
+
+/// Converts a frame coordinate into a terminal-screen coordinate if it is inside.
+pub fn frame_to_screen(col: u16, row: u16, inner: Rect) -> Option<ScreenPos> {
+    if col >= inner.x
+        && col < inner.x + inner.width
+        && row >= inner.y
+        && row < inner.y + inner.height
+    {
+        Some(ScreenPos {
+            row: row - inner.y,
+            col: col - inner.x,
+        })
+    } else {
+        None
+    }
+}
+
+/// Converts a frame coordinate into the nearest terminal-screen coordinate.
+///
+/// Drag selections should continue to update even if the mouse leaves the
+/// terminal area, so this clamps to the edge instead of returning `None`.
+pub fn frame_to_screen_clamped(col: u16, row: u16, inner: Rect) -> ScreenPos {
+    ScreenPos {
+        col: col
+            .max(inner.x)
+            .min(inner.x + inner.width.saturating_sub(1))
+            - inner.x,
+        row: row
+            .max(inner.y)
+            .min(inner.y + inner.height.saturating_sub(1))
+            - inner.y,
+    }
+}
 
 /// Renders the entire application for the current frame.
 ///

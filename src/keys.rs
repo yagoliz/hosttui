@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
 /// Encodes a crossterm key event into bytes understood by programs in a PTY.
 ///
@@ -57,6 +57,25 @@ pub fn encode(key: &KeyEvent) -> Option<Vec<u8>> {
         KeyCode::F(11) => Some(b"\x1b[23~".to_vec()),
         KeyCode::F(12) => Some(b"\x1b[24~".to_vec()),
         _ => None,
+    }
+}
+
+/// Converts one pasted character into a synthetic key event for host forms.
+///
+/// `tui-input` consumes crossterm key events rather than raw paste strings, so
+/// host-view paste is replayed character-by-character through the normal key
+/// handling path. Session paste uses raw PTY paste handling instead.
+pub fn paste_key(ch: char) -> KeyEvent {
+    let code = match ch {
+        '\n' | '\r' => KeyCode::Enter,
+        '\t' => KeyCode::Tab,
+        ch => KeyCode::Char(ch),
+    };
+    KeyEvent {
+        code,
+        modifiers: KeyModifiers::NONE,
+        kind: KeyEventKind::Press,
+        state: KeyEventState::NONE,
     }
 }
 

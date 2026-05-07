@@ -11,6 +11,37 @@ use std::time::{Duration, Instant};
 use crate::model::{Config, Host};
 use crate::pty::{Session, SessionStatus};
 
+/// Copies the active terminal selection to the system clipboard.
+///
+/// The selection is read from the parsed vt100 screen, not from ratatui's frame
+/// buffer. After a successful copy the selection is cleared and a short-lived
+/// notification is shown in the session view.
+pub fn copy_selection(app: &mut App) {
+    let Some(sel) = app.selection else { return };
+    if sel.anchor == sel.end {
+        app.clear_selection();
+        return;
+    }
+
+    let (start, end) = sel.normalized();
+    let mut copied = false;
+    if let View::Session(idx) = app.view
+        && let Some(session) = app.sessions.get(idx)
+    {
+        let screen = session.screen();
+        let text = screen.contents_between(start.row, start.col, end.row, end.col);
+        if !text.is_empty()
+            && let Ok(mut clipboard) = arboard::Clipboard::new()
+        {
+            copied = clipboard.set_text(text).is_ok();
+        }
+    }
+    app.clear_selection();
+    if copied {
+        app.show_clipboard_notice();
+    }
+}
+
 /// Zero-based coordinate inside a rendered terminal screen.
 ///
 /// These coordinates are relative to the PTY viewport, not the outer ratatui

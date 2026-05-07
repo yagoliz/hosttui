@@ -1,5 +1,6 @@
 pub mod app;
 pub mod error;
+pub mod handlers;
 pub mod keys;
 pub mod model;
 pub mod pty;
