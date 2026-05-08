@@ -104,6 +104,14 @@ pub fn render(frame: &mut Frame, app: &App) {
                             &format!("{dir_label} '{file}'?\nFile already exists at destination."),
                         );
                     }
+                    FileBrowserMode::ConfirmDelete { name, is_dir } => {
+                        let kind = if *is_dir { "directory" } else { "file" };
+                        render_confirm(
+                            frame,
+                            "Confirm Delete",
+                            &format!("Delete {kind} '{name}'?"),
+                        );
+                    }
                     _ => {}
                 }
             }
@@ -329,7 +337,8 @@ fn render_file_transfer_view(frame: &mut Frame, fb: &FileBrowser, area: Rect) {
             );
         }
         SftpConnectionStatus::Failed(ref msg) => {
-            render_file_pane_message(frame, "Remote", msg, Color::Red, remote_area);
+            let display = format!("{msg}\n\nPress R to reconnect");
+            render_file_pane_message(frame, "Remote", &display, Color::Red, remote_area);
         }
     }
 
@@ -414,10 +423,12 @@ fn render_file_pane(
         Line::from(vec![
             " j/k ".into(),
             "Nav".blue().bold(),
-            " Enter ".into(),
-            "Open".blue().bold(),
             " y ".into(),
             "Copy".blue().bold(),
+            " d ".into(),
+            "Del".blue().bold(),
+            " m ".into(),
+            "Mkdir".blue().bold(),
             " . ".into(),
             "Hidden".blue().bold(),
             " s ".into(),
@@ -444,24 +455,45 @@ fn render_file_pane(
         .iter()
         .enumerate()
         .map(|(i, entry)| {
+            let symlink_suffix = if entry.is_symlink { " @" } else { "" };
+
             let (name_span, size_str) = if entry.is_dir {
                 (
                     Span::styled(
-                        format!("{}/", entry.name),
+                        format!("{}/{symlink_suffix}", entry.name),
                         Style::default().fg(Color::Yellow),
                     ),
                     String::new(),
                 )
             } else {
-                (Span::raw(entry.name.clone()), format_size(entry.size))
+                (
+                    if entry.is_symlink {
+                        Span::styled(
+                            format!("{}{symlink_suffix}", entry.name),
+                            Style::default().fg(Color::Magenta),
+                        )
+                    } else {
+                        Span::raw(entry.name.clone())
+                    },
+                    format_size(entry.size),
+                )
+            };
+
+            let perms_str = entry.permissions_string().unwrap_or_default();
+            let right_side = if perms_str.is_empty() {
+                size_str.clone()
+            } else if size_str.is_empty() {
+                perms_str.clone()
+            } else {
+                format!("{perms_str}  {size_str}")
             };
 
             let available_width = inner.width as usize;
             let name_width = name_span.width();
-            let size_width = size_str.len();
+            let right_width = right_side.len();
 
-            let padding = if available_width > name_width + size_width + 2 {
-                available_width - name_width - size_width - 1
+            let padding = if available_width > name_width + right_width + 2 {
+                available_width - name_width - right_width - 1
             } else {
                 1
             };
@@ -484,7 +516,7 @@ fn render_file_pane(
                     Span::raw(" "),
                     name_span,
                     Span::raw(" ".repeat(padding)),
-                    Span::styled(size_str, Style::default().fg(Color::DarkGray)),
+                    Span::styled(right_side, Style::default().fg(Color::DarkGray)),
                 ])
                 .style(style),
             )
@@ -512,15 +544,21 @@ fn render_file_pane_message(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    let lines: Vec<Line> = message
+        .lines()
+        .map(|l| Line::from(Span::styled(l.to_string(), Style::default().fg(color))).centered())
+        .collect();
+    let line_count = lines.len() as u16;
+
     if inner.height > 0 {
+        let start_y = inner.y + inner.height.saturating_sub(line_count) / 2;
         let msg_area = Rect {
             x: inner.x,
-            y: inner.y + inner.height / 2,
+            y: start_y,
             width: inner.width,
-            height: 1,
+            height: line_count.min(inner.height),
         };
-        let line = Line::from(Span::styled(message, Style::default().fg(color))).centered();
-        frame.render_widget(Paragraph::new(line), msg_area);
+        frame.render_widget(Paragraph::new(lines), msg_area);
     }
 }
 
@@ -835,7 +873,7 @@ fn render_test_result(frame: &mut Frame, alias: &str, status: &TestStatus) {
 
 /// Renders the Ctrl+T tab-command help overlay.
 fn render_tab_help(frame: &mut Frame) {
-    let area = centered_rect(40, 11, frame.area());
+    let area = centered_rect(40, 14, frame.area());
     frame.render_widget(Clear, area);
 
     let block = Block::bordered()
@@ -867,6 +905,10 @@ fn render_tab_help(frame: &mut Frame) {
         Line::from(vec![
             Span::styled("^T x  ", key_style),
             Span::raw("Close current tab"),
+        ]),
+        Line::from(vec![
+            Span::styled("^T f  ", key_style),
+            Span::raw("File transfer (from session)"),
         ]),
         Line::from(vec![
             Span::styled("^T ^T ", key_style),

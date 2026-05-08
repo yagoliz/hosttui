@@ -19,6 +19,14 @@ pub enum TransferRequest {
         remote_path: String,
         local_path: PathBuf,
     },
+    UploadDir {
+        local_path: PathBuf,
+        remote_path: String,
+    },
+    DownloadDir {
+        remote_path: String,
+        local_path: PathBuf,
+    },
 }
 
 /// Terminal state of a transfer. Transitions are one-way out of `InProgress`.
@@ -85,6 +93,21 @@ pub fn spawn_transfer(
                 .to_string(),
             "Downloading".to_string(),
         ),
+        TransferRequest::UploadDir { local_path, .. } => (
+            local_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            "Uploading dir".to_string(),
+        ),
+        TransferRequest::DownloadDir { remote_path, .. } => (
+            remote_path
+                .rsplit('/')
+                .next()
+                .unwrap_or(remote_path)
+                .to_string(),
+            "Downloading dir".to_string(),
+        ),
     };
 
     let progress = Arc::new(Mutex::new(TransferProgress {
@@ -108,6 +131,14 @@ pub fn spawn_transfer(
             local_path,
             remote_path,
         } => run_upload(sftp, local_path, remote_path, p, c),
+        TransferRequest::UploadDir {
+            local_path,
+            remote_path,
+        } => run_upload_dir(sftp, local_path, remote_path, p, c),
+        TransferRequest::DownloadDir {
+            remote_path,
+            local_path,
+        } => run_download_dir(sftp, remote_path, local_path, p, c),
     });
 
     TransferHandle {
@@ -249,6 +280,219 @@ fn run_upload(
     }
 }
 
+/// Recursively uploads a local directory to a remote path.
+///
+/// Walks the local tree depth-first: creates remote directories first, then
+/// transfers each file sequentially. `total_bytes` is computed upfront by
+/// walking the local tree so the progress bar can show a meaningful percentage.
+fn run_upload_dir(
+    sftp: Arc<Mutex<Option<SftpConnection>>>,
+    local_root: PathBuf,
+    remote_root: String,
+    progress: Arc<Mutex<TransferProgress>>,
+    cancel: Arc<AtomicBool>,
+) {
+    let total = dir_total_bytes(&local_root);
+    progress.lock().unwrap().total_bytes = total;
+
+    let result: Result<(), String> = (|| {
+        let guard = sftp.lock().unwrap();
+        let conn = guard.as_ref().ok_or_else(|| "Not connected".to_string())?;
+
+        upload_dir_inner(conn, &local_root, &remote_root, &progress, &cancel)
+    })();
+
+    match result {
+        Ok(()) => {
+            progress.lock().unwrap().status = TransferStatus::Completed;
+        }
+        Err(msg) if msg == "__cancelled__" => {
+            progress.lock().unwrap().status = TransferStatus::Cancelled;
+        }
+        Err(msg) => {
+            progress.lock().unwrap().status = TransferStatus::Failed(msg);
+        }
+    }
+}
+
+/// Inner recursive helper for directory upload (runs while holding the SFTP mutex).
+fn upload_dir_inner(
+    conn: &SftpConnection,
+    local_dir: &Path,
+    remote_dir: &str,
+    progress: &Arc<Mutex<TransferProgress>>,
+    cancel: &Arc<AtomicBool>,
+) -> Result<(), String> {
+    if let Err(e) = conn.sftp().mkdir(Path::new(remote_dir), 0o755)
+        && conn.sftp().stat(Path::new(remote_dir)).is_err()
+    {
+        return Err(format!("mkdir '{remote_dir}': {e}"));
+    }
+
+    let entries = std::fs::read_dir(local_dir).map_err(|e| format!("read local dir: {e}"))?;
+
+    for entry in entries {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("__cancelled__".into());
+        }
+
+        let entry = entry.map_err(|e| format!("read entry: {e}"))?;
+        let meta = entry.metadata().map_err(|e| format!("metadata: {e}"))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let child_remote = format!("{}/{}", remote_dir.trim_end_matches('/'), name);
+
+        if meta.is_dir() {
+            upload_dir_inner(conn, &entry.path(), &child_remote, progress, cancel)?;
+        } else {
+            progress.lock().unwrap().file_name = name;
+
+            let mut local_file =
+                std::fs::File::open(entry.path()).map_err(|e| format!("open local: {e}"))?;
+            let mut remote_file = conn
+                .sftp()
+                .create(Path::new(&child_remote))
+                .map_err(|e| format!("create remote: {e}"))?;
+
+            let mut buf = [0u8; CHUNK_SIZE];
+            loop {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err("__cancelled__".into());
+                }
+                let n = local_file
+                    .read(&mut buf)
+                    .map_err(|e| format!("read: {e}"))?;
+                if n == 0 {
+                    break;
+                }
+                remote_file
+                    .write_all(&buf[..n])
+                    .map_err(|e| format!("write: {e}"))?;
+                progress.lock().unwrap().bytes_transferred += n as u64;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Recursively downloads a remote directory to a local path.
+///
+/// Mirrors the remote tree into the local filesystem: creates local
+/// directories first, then transfers each file sequentially.
+fn run_download_dir(
+    sftp: Arc<Mutex<Option<SftpConnection>>>,
+    remote_root: String,
+    local_root: PathBuf,
+    progress: Arc<Mutex<TransferProgress>>,
+    cancel: Arc<AtomicBool>,
+) {
+    let result: Result<(), String> = (|| {
+        let guard = sftp.lock().unwrap();
+        let conn = guard.as_ref().ok_or_else(|| "Not connected".to_string())?;
+
+        let total = remote_dir_total_bytes(conn, &remote_root)?;
+        progress.lock().unwrap().total_bytes = total;
+
+        download_dir_inner(conn, &remote_root, &local_root, &progress, &cancel)
+    })();
+
+    match result {
+        Ok(()) => {
+            progress.lock().unwrap().status = TransferStatus::Completed;
+        }
+        Err(msg) if msg == "__cancelled__" => {
+            progress.lock().unwrap().status = TransferStatus::Cancelled;
+        }
+        Err(msg) => {
+            progress.lock().unwrap().status = TransferStatus::Failed(msg);
+        }
+    }
+}
+
+/// Inner recursive helper for directory download (runs while holding the SFTP mutex).
+fn download_dir_inner(
+    conn: &SftpConnection,
+    remote_dir: &str,
+    local_dir: &Path,
+    progress: &Arc<Mutex<TransferProgress>>,
+    cancel: &Arc<AtomicBool>,
+) -> Result<(), String> {
+    std::fs::create_dir_all(local_dir).map_err(|e| format!("mkdir local: {e}"))?;
+
+    let entries = conn.list_dir(remote_dir).map_err(|e| e.to_string())?;
+
+    for entry in &entries {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("__cancelled__".into());
+        }
+
+        let child_remote = format!("{}/{}", remote_dir.trim_end_matches('/'), entry.name);
+        let child_local = local_dir.join(&entry.name);
+
+        if entry.is_dir {
+            download_dir_inner(conn, &child_remote, &child_local, progress, cancel)?;
+        } else {
+            progress.lock().unwrap().file_name = entry.name.clone();
+
+            let mut remote_file = conn
+                .sftp()
+                .open(Path::new(&child_remote))
+                .map_err(|e| format!("open remote: {e}"))?;
+            let mut local_file =
+                std::fs::File::create(&child_local).map_err(|e| format!("create local: {e}"))?;
+
+            let mut buf = [0u8; CHUNK_SIZE];
+            loop {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err("__cancelled__".into());
+                }
+                let n = remote_file
+                    .read(&mut buf)
+                    .map_err(|e| format!("read: {e}"))?;
+                if n == 0 {
+                    break;
+                }
+                local_file
+                    .write_all(&buf[..n])
+                    .map_err(|e| format!("write: {e}"))?;
+                progress.lock().unwrap().bytes_transferred += n as u64;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Walks a local directory tree and sums all file sizes.
+fn dir_total_bytes(path: &Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_dir() {
+                    total += dir_total_bytes(&entry.path());
+                } else {
+                    total += meta.len();
+                }
+            }
+        }
+    }
+    total
+}
+
+/// Walks a remote directory tree via SFTP and sums all file sizes.
+fn remote_dir_total_bytes(conn: &SftpConnection, path: &str) -> Result<u64, String> {
+    let entries = conn.list_dir(path).map_err(|e| e.to_string())?;
+    let mut total = 0u64;
+    for entry in &entries {
+        if entry.is_dir {
+            let child = format!("{}/{}", path.trim_end_matches('/'), entry.name);
+            total += remote_dir_total_bytes(conn, &child)?;
+        } else {
+            total += entry.size;
+        }
+    }
+    Ok(total)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,5 +604,62 @@ mod tests {
         assert!(
             matches!(progress.status, TransferStatus::Failed(ref msg) if msg.contains("Not connected"))
         );
+    }
+
+    #[test]
+    fn dir_total_bytes_sums_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "world!").unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("c.txt"), "!").unwrap();
+
+        let total = dir_total_bytes(dir.path());
+        assert_eq!(total, 5 + 6 + 1);
+    }
+
+    #[test]
+    fn dir_total_bytes_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(dir_total_bytes(dir.path()), 0);
+    }
+
+    #[test]
+    fn spawn_transfer_sets_label_upload_dir() {
+        let sftp = Arc::new(Mutex::new(None));
+        let handle = spawn_transfer(
+            sftp,
+            TransferRequest::UploadDir {
+                local_path: PathBuf::from("/tmp/mydir"),
+                remote_path: "/home/user/mydir".into(),
+            },
+        );
+        let progress = handle.progress.lock().unwrap();
+        assert_eq!(progress.label, "Uploading dir");
+        assert_eq!(progress.file_name, "mydir");
+        drop(progress);
+        if let Some(jh) = handle.join_handle {
+            let _ = jh.join();
+        }
+    }
+
+    #[test]
+    fn spawn_transfer_sets_label_download_dir() {
+        let sftp = Arc::new(Mutex::new(None));
+        let handle = spawn_transfer(
+            sftp,
+            TransferRequest::DownloadDir {
+                remote_path: "/home/user/mydir".into(),
+                local_path: PathBuf::from("/tmp/mydir"),
+            },
+        );
+        let progress = handle.progress.lock().unwrap();
+        assert_eq!(progress.label, "Downloading dir");
+        assert_eq!(progress.file_name, "mydir");
+        drop(progress);
+        if let Some(jh) = handle.join_handle {
+            let _ = jh.join();
+        }
     }
 }

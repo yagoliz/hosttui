@@ -35,6 +35,10 @@ pub enum FileBrowserMode {
         file: String,
         direction: TransferDirection,
     },
+    ConfirmDelete {
+        name: String,
+        is_dir: bool,
+    },
     PasswordPrompt(Input),
     TransferError(String),
     Creating(Input),
@@ -99,6 +103,8 @@ pub fn list_local_dir(path: &Path) -> std::io::Result<Vec<FileEntry>> {
     let mut entries = Vec::new();
     for entry in fs::read_dir(path)? {
         let Ok(entry) = entry else { continue };
+        let is_symlink = entry.file_type().is_ok_and(|ft| ft.is_symlink());
+        // Follow symlinks for metadata (size, modified, is_dir) but record the link status
         let Ok(meta) = entry.metadata() else { continue };
 
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -119,6 +125,7 @@ pub fn list_local_dir(path: &Path) -> std::io::Result<Vec<FileEntry>> {
         entries.push(FileEntry {
             name,
             is_dir: meta.is_dir(),
+            is_symlink,
             size: meta.len(),
             modified,
             permissions,
@@ -295,7 +302,11 @@ impl FileBrowser {
                 true
             }
             Err(e) => {
-                self.error = Some(format!("Cannot open directory: {e}"));
+                if self.is_session_dead() {
+                    self.mark_disconnected(format!("Connection lost: {e}"));
+                } else {
+                    self.error = Some(format!("Cannot open directory: {e}"));
+                }
                 false
             }
         }
@@ -377,7 +388,11 @@ impl FileBrowser {
                     .unwrap_or(0);
             }
             Err(e) => {
-                self.error = Some(format!("Cannot open parent: {e}"));
+                if self.is_session_dead() {
+                    self.mark_disconnected(format!("Connection lost: {e}"));
+                } else {
+                    self.error = Some(format!("Cannot open parent: {e}"));
+                }
             }
         }
     }
@@ -432,6 +447,10 @@ impl FileBrowser {
     }
 
     /// Refreshes the remote directory listing via SFTP.
+    ///
+    /// On failure, checks whether the underlying SSH session is still alive.
+    /// If the session is dead, transitions to disconnected state so the UI can
+    /// offer reconnection.
     pub fn refresh_remote(&mut self) {
         let result = {
             let sftp_guard = self.sftp.lock().unwrap();
@@ -448,9 +467,22 @@ impl FileBrowser {
                 self.clamp_selections();
             }
             Err(e) => {
-                self.error = Some(format!("Refresh failed: {e}"));
+                if self.is_session_dead() {
+                    self.mark_disconnected(format!("Connection lost: {e}"));
+                } else {
+                    self.error = Some(format!("Refresh failed: {e}"));
+                }
             }
         }
+    }
+
+    /// Probes whether the SSH session is still alive by sending a keepalive.
+    fn is_session_dead(&self) -> bool {
+        let sftp_guard = self.sftp.lock().unwrap();
+        let Some(ref conn) = *sftp_guard else {
+            return true;
+        };
+        conn.session().keepalive_send().is_err()
     }
 
     /// Returns the currently selected file entry in the focused pane, if any.
@@ -505,6 +537,16 @@ impl FileBrowser {
         }
     }
 
+    /// Marks the connection as failed and clears remote state.
+    ///
+    /// Called when an SFTP operation detects the session has dropped. The UI
+    /// will show the failure message, and the user can press `R` to reconnect.
+    pub fn mark_disconnected(&mut self, message: String) {
+        *self.connection_status.lock().unwrap() = SftpConnectionStatus::Failed(message);
+        *self.sftp.lock().unwrap() = None;
+        self.remote_entries.clear();
+    }
+
     /// Returns a snapshot of the most recent transfer's progress, if any.
     ///
     /// The UI uses this to decide whether to render the progress bar.
@@ -534,6 +576,7 @@ mod tests {
         FileEntry {
             name: name.into(),
             is_dir,
+            is_symlink: false,
             size,
             modified: None,
             permissions: None,
@@ -544,6 +587,7 @@ mod tests {
         FileEntry {
             name: name.into(),
             is_dir,
+            is_symlink: false,
             size,
             modified: Some(modified),
             permissions: None,

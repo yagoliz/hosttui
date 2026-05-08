@@ -344,6 +344,9 @@ pub fn handle_file_transfer_key(app: &mut App, ev: &Event, code: KeyCode, modifi
         FileBrowserMode::ConfirmTransfer { .. } => {
             handle_file_transfer_confirm(app, code);
         }
+        FileBrowserMode::ConfirmDelete { .. } => {
+            handle_file_transfer_delete(app, code);
+        }
         FileBrowserMode::TransferError(_) => match code {
             KeyCode::Enter | KeyCode::Esc => {
                 let ft = app.active_file_transfer_mut().unwrap();
@@ -360,6 +363,8 @@ enum PostAction {
     None,
     InitiateTransfer,
     CancelTransfer,
+    DeleteSelected,
+    Reconnect,
     Close,
     SetPrefix,
 }
@@ -436,6 +441,8 @@ fn handle_file_transfer_normal(app: &mut App, code: KeyCode, modifiers: KeyModif
                 ft.mode = FileBrowserMode::Creating(Input::default());
                 PostAction::None
             }
+            KeyCode::Char('d') => PostAction::DeleteSelected,
+            KeyCode::Char('R') => PostAction::Reconnect,
             KeyCode::Esc => PostAction::Close,
             KeyCode::Char('t') if modifiers.contains(KeyModifiers::CONTROL) => {
                 PostAction::SetPrefix
@@ -447,6 +454,8 @@ fn handle_file_transfer_normal(app: &mut App, code: KeyCode, modifiers: KeyModif
     match action {
         PostAction::InitiateTransfer => initiate_transfer(app),
         PostAction::CancelTransfer => cancel_active_transfer(app),
+        PostAction::DeleteSelected => initiate_delete(app),
+        PostAction::Reconnect => reconnect_sftp(app),
         PostAction::Close => app.close_current_file_transfer(),
         PostAction::SetPrefix => app.prefix = PrefixState::Pending,
         PostAction::None => {}
@@ -596,7 +605,7 @@ fn handle_file_transfer_confirm(app: &mut App, code: KeyCode) {
             let remote_path = format!("{}/{}", ft.remote_path.trim_end_matches('/'), file);
 
             ft.mode = FileBrowserMode::Normal;
-            start_transfer(ft, direction, local_path, remote_path);
+            start_transfer(ft, direction, local_path, remote_path, false);
         }
         KeyCode::Char('n') | KeyCode::Esc => {
             ft.mode = FileBrowserMode::Normal;
@@ -613,8 +622,8 @@ fn initiate_transfer(app: &mut App) {
     };
 
     let entry = match ft.selected_entry() {
-        Some(e) if !e.is_dir => e.clone(),
-        _ => return,
+        Some(e) => e.clone(),
+        None => return,
     };
 
     let (direction, local_path, remote_path) = match ft.focus {
@@ -641,13 +650,13 @@ fn initiate_transfer(app: &mut App) {
         TransferDirection::Download => local_path.exists(),
     };
 
-    if dest_exists {
+    if dest_exists && !entry.is_dir {
         ft.mode = FileBrowserMode::ConfirmTransfer {
             file: entry.name.clone(),
             direction,
         };
     } else {
-        start_transfer(ft, direction, local_path, remote_path);
+        start_transfer(ft, direction, local_path, remote_path, entry.is_dir);
     }
 }
 
@@ -657,13 +666,22 @@ fn start_transfer(
     direction: TransferDirection,
     local_path: PathBuf,
     remote_path: String,
+    is_dir: bool,
 ) {
-    let request = match direction {
-        TransferDirection::Upload => TransferRequest::Upload {
+    let request = match (direction, is_dir) {
+        (TransferDirection::Upload, false) => TransferRequest::Upload {
             local_path,
             remote_path,
         },
-        TransferDirection::Download => TransferRequest::Download {
+        (TransferDirection::Download, false) => TransferRequest::Download {
+            remote_path,
+            local_path,
+        },
+        (TransferDirection::Upload, true) => TransferRequest::UploadDir {
+            local_path,
+            remote_path,
+        },
+        (TransferDirection::Download, true) => TransferRequest::DownloadDir {
             remote_path,
             local_path,
         },
@@ -671,6 +689,138 @@ fn start_transfer(
 
     let handle = transfer::spawn_transfer(Arc::clone(&ft.sftp), request);
     ft.transfers.push(handle);
+}
+
+/// Attempts to reconnect a disconnected SFTP session on a background thread.
+///
+/// Only triggers when the connection status is `Failed`. Resets the status to
+/// `Connecting` and spawns a fresh connection attempt using the same host config.
+fn reconnect_sftp(app: &mut App) {
+    let Some(ft) = app.active_file_transfer_mut() else {
+        return;
+    };
+
+    let status = ft.connection_status.lock().unwrap().clone();
+    if !matches!(status, SftpConnectionStatus::Failed(_)) {
+        return;
+    }
+
+    let host = ft.host.clone();
+    let sftp_arc = Arc::clone(&ft.sftp);
+    let status_arc = Arc::clone(&ft.connection_status);
+
+    *status_arc.lock().unwrap() = SftpConnectionStatus::Connecting;
+    ft.error = None;
+
+    std::thread::spawn(move || match SftpConnection::connect(&host) {
+        Ok(conn) => {
+            let home = conn.home_dir().unwrap_or_else(|_| "/".into());
+            let entries = conn.list_dir(&home).unwrap_or_default();
+            *sftp_arc.lock().unwrap() = Some(conn);
+            *status_arc.lock().unwrap() = SftpConnectionStatus::ConnectedWithData {
+                home_dir: home,
+                entries,
+            };
+        }
+        Err(ConnectOutcome::NeedsPassword) => {
+            *status_arc.lock().unwrap() = SftpConnectionStatus::NeedsPassword;
+        }
+        Err(ConnectOutcome::Failed(msg)) => {
+            *status_arc.lock().unwrap() = SftpConnectionStatus::Failed(msg);
+        }
+    });
+}
+
+/// Shows a confirmation dialog for deleting the selected file or directory.
+fn initiate_delete(app: &mut App) {
+    let Some(ft) = app.active_file_transfer_mut() else {
+        return;
+    };
+    let Some(entry) = ft.selected_entry().cloned() else {
+        return;
+    };
+    ft.mode = FileBrowserMode::ConfirmDelete {
+        name: entry.name,
+        is_dir: entry.is_dir,
+    };
+}
+
+/// Handles keys for the delete confirmation dialog.
+fn handle_file_transfer_delete(app: &mut App, code: KeyCode) {
+    let Some(ft) = app.active_file_transfer_mut() else {
+        return;
+    };
+
+    match code {
+        KeyCode::Char('y') | KeyCode::Enter => {
+            let (name, is_dir) = match &ft.mode {
+                FileBrowserMode::ConfirmDelete { name, is_dir } => (name.clone(), *is_dir),
+                _ => return,
+            };
+            ft.mode = FileBrowserMode::Normal;
+
+            match ft.focus {
+                FileBrowserPane::Local => {
+                    let target = ft.local_path.join(&name);
+                    let result = if is_dir {
+                        std::fs::remove_dir_all(&target)
+                    } else {
+                        std::fs::remove_file(&target)
+                    };
+                    match result {
+                        Ok(()) => ft.refresh_local(),
+                        Err(e) => ft.error = Some(format!("Delete failed: {e}")),
+                    }
+                }
+                FileBrowserPane::Remote => {
+                    let target = format!("{}/{}", ft.remote_path.trim_end_matches('/'), name);
+                    let result = {
+                        let sftp_guard = ft.sftp.lock().unwrap();
+                        if let Some(ref conn) = *sftp_guard {
+                            if is_dir {
+                                rmdir_recursive(conn, &target)
+                            } else {
+                                conn.sftp()
+                                    .unlink(Path::new(&target))
+                                    .map_err(|e| e.to_string())
+                            }
+                        } else {
+                            Err("Not connected".into())
+                        }
+                    };
+                    match result {
+                        Ok(()) => ft.refresh_remote(),
+                        Err(e) => ft.error = Some(format!("Delete failed: {e}")),
+                    }
+                }
+            }
+        }
+        KeyCode::Char('n') | KeyCode::Esc => {
+            ft.mode = FileBrowserMode::Normal;
+        }
+        _ => {}
+    }
+}
+
+/// Recursively removes a remote directory via SFTP.
+///
+/// SFTP's `rmdir` only works on empty directories, so we walk the tree
+/// depth-first, removing files and subdirectories before the parent.
+fn rmdir_recursive(conn: &crate::sftp::SftpConnection, path: &str) -> Result<(), String> {
+    let entries = conn.list_dir(path).map_err(|e| e.to_string())?;
+    for entry in &entries {
+        let child = format!("{}/{}", path.trim_end_matches('/'), entry.name);
+        if entry.is_dir {
+            rmdir_recursive(conn, &child)?;
+        } else {
+            conn.sftp()
+                .unlink(Path::new(&child))
+                .map_err(|e| format!("unlink '{child}': {e}"))?;
+        }
+    }
+    conn.sftp()
+        .rmdir(Path::new(path))
+        .map_err(|e| format!("rmdir '{path}': {e}"))
 }
 
 /// Signals the most recent active transfer to cancel at the next chunk boundary.

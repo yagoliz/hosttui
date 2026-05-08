@@ -41,6 +41,7 @@ pub enum SftpConnectionStatus {
 pub struct FileEntry {
     pub name: String,
     pub is_dir: bool,
+    pub is_symlink: bool,
     pub size: u64,
     pub modified: Option<u64>,
     pub permissions: Option<u32>,
@@ -50,6 +51,22 @@ impl FileEntry {
     /// Ordering key: directories sort before files, then alphabetically by name.
     fn sort_key(&self) -> (u8, &str) {
         (if self.is_dir { 0 } else { 1 }, &self.name)
+    }
+
+    /// Formats Unix permission bits as a `rwxr-xr-x` string.
+    ///
+    /// Only the lower 9 bits (owner/group/other) are rendered. Returns `None` if
+    /// no permission data is available.
+    pub fn permissions_string(&self) -> Option<String> {
+        let mode = self.permissions?;
+        let mut s = String::with_capacity(9);
+        for shift in [6, 3, 0] {
+            let bits = (mode >> shift) & 0o7;
+            s.push(if bits & 4 != 0 { 'r' } else { '-' });
+            s.push(if bits & 2 != 0 { 'w' } else { '-' });
+            s.push(if bits & 1 != 0 { 'x' } else { '-' });
+        }
+        Some(s)
     }
 }
 
@@ -243,9 +260,11 @@ impl SftpConnection {
             .into_iter()
             .filter_map(|(pathbuf, stat)| {
                 let name = pathbuf.file_name()?.to_string_lossy().into_owned();
+                let is_symlink = stat.perm.is_some_and(|p| p & 0o170000 == 0o120000);
                 Some(FileEntry {
                     name,
                     is_dir: stat.is_dir(),
+                    is_symlink,
                     size: stat.size.unwrap_or(0),
                     modified: stat.mtime,
                     permissions: stat.perm,
@@ -272,9 +291,11 @@ impl SftpConnection {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
 
+        let is_symlink = stat.perm.is_some_and(|p| p & 0o170000 == 0o120000);
         Ok(FileEntry {
             name,
             is_dir: stat.is_dir(),
+            is_symlink,
             size: stat.size.unwrap_or(0),
             modified: stat.mtime,
             permissions: stat.perm,
@@ -348,6 +369,7 @@ mod tests {
         FileEntry {
             name: name.into(),
             is_dir,
+            is_symlink: false,
             size,
             modified: None,
             permissions: None,
@@ -359,12 +381,14 @@ mod tests {
         let e = FileEntry {
             name: "test.txt".into(),
             is_dir: false,
+            is_symlink: false,
             size: 1024,
             modified: Some(1700000000),
             permissions: Some(0o644),
         };
         assert_eq!(e.name, "test.txt");
         assert!(!e.is_dir);
+        assert!(!e.is_symlink);
         assert_eq!(e.size, 1024);
         assert_eq!(e.modified, Some(1700000000));
         assert_eq!(e.permissions, Some(0o644));
@@ -375,6 +399,7 @@ mod tests {
         let e = FileEntry {
             name: "src".into(),
             is_dir: true,
+            is_symlink: false,
             size: 4096,
             modified: None,
             permissions: Some(0o755),
@@ -459,6 +484,42 @@ mod tests {
 
         let failed = ConnectOutcome::Failed("timeout".into());
         assert_eq!(failed.to_string(), "timeout");
+    }
+
+    #[test]
+    fn permissions_string_formats_correctly() {
+        let mut e = entry("f", false, 0);
+        e.permissions = Some(0o100755);
+        assert_eq!(e.permissions_string().unwrap(), "rwxr-xr-x");
+
+        e.permissions = Some(0o100644);
+        assert_eq!(e.permissions_string().unwrap(), "rw-r--r--");
+
+        e.permissions = Some(0o100600);
+        assert_eq!(e.permissions_string().unwrap(), "rw-------");
+
+        e.permissions = Some(0o40755);
+        assert_eq!(e.permissions_string().unwrap(), "rwxr-xr-x");
+    }
+
+    #[test]
+    fn permissions_string_none_when_missing() {
+        let e = entry("f", false, 0);
+        assert!(e.permissions_string().is_none());
+    }
+
+    #[test]
+    fn symlink_detection_from_perm_bits() {
+        let mut entries = vec![];
+        entries.push(FileEntry {
+            name: "link".into(),
+            is_dir: false,
+            is_symlink: true,
+            size: 0,
+            modified: None,
+            permissions: Some(0o120777),
+        });
+        assert!(entries[0].is_symlink);
     }
 
     #[test]
