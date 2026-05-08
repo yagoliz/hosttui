@@ -118,25 +118,15 @@ impl SftpConnection {
 
     /// Attempts non-interactive authentication methods.
     ///
-    /// Order matters: the host's explicit identity file is tried first (most
-    /// targeted), then the SSH agent, then well-known default key paths. The
-    /// agent is deliberately *not* first because `userauth_agent` iterates
-    /// every key loaded in the agent — each rejected key counts against the
-    /// server's `MaxAuthTries`, which can be exhausted before the correct
-    /// identity file ever gets a chance.
+    /// Key files (explicit identity file, then well-known defaults) are tried
+    /// first without a passphrase. The SSH agent is last because
+    /// `userauth_agent` iterates every loaded key — each rejection counts
+    /// against the server's `MaxAuthTries`, which can be exhausted before the
+    /// correct key file ever gets a chance.
     fn try_auth(session: &Session, host: &Host) -> Result<bool, ConnectOutcome> {
-        // 1. Explicit identity file from host config — highest priority
-        if let Some(ref key_path) = host.identity_file {
-            let expanded = shellexpand_tilde(key_path);
-            let path = Path::new(&expanded);
-            if path.exists()
-                && session
-                    .userauth_pubkey_file(&host.user, None, path, None)
-                    .is_ok()
-                && session.authenticated()
-            {
-                return Ok(true);
-            }
+        // 1. Key files without passphrase
+        if Self::try_pubkey_files(session, host, None) {
+            return Ok(true);
         }
 
         // 2. SSH agent
@@ -144,30 +134,55 @@ impl SftpConnection {
             return Ok(true);
         }
 
-        // 3. Common default key paths
+        Ok(false)
+    }
+
+    /// Tries key-file authentication with an optional passphrase.
+    ///
+    /// Checks the host's explicit identity file first, then well-known default
+    /// key paths (~/.ssh/id_ed25519, id_rsa, id_ecdsa). Returns `true` as soon
+    /// as one succeeds. Used both for the initial passwordless attempt and for
+    /// retrying with a user-supplied passphrase.
+    fn try_pubkey_files(session: &Session, host: &Host, passphrase: Option<&str>) -> bool {
+        // Explicit identity file from host config — highest priority
+        if let Some(ref key_path) = host.identity_file {
+            let expanded = shellexpand_tilde(key_path);
+            let path = Path::new(&expanded);
+            if path.exists()
+                && session
+                    .userauth_pubkey_file(&host.user, None, path, passphrase)
+                    .is_ok()
+                && session.authenticated()
+            {
+                return true;
+            }
+        }
+
+        // Common default key paths
         if let Some(home) = dirs::home_dir() {
             let default_keys = ["id_ed25519", "id_rsa", "id_ecdsa"];
             for key_name in &default_keys {
                 let path = home.join(".ssh").join(key_name);
                 if path.exists()
                     && session
-                        .userauth_pubkey_file(&host.user, None, &path, None)
+                        .userauth_pubkey_file(&host.user, None, &path, passphrase)
                         .is_ok()
                     && session.authenticated()
                 {
-                    return Ok(true);
+                    return true;
                 }
             }
         }
 
-        Ok(false)
+        false
     }
 
-    /// Retries authentication using a password after `NeedsPassword`.
+    /// Retries authentication using a user-supplied credential after `NeedsPassword`.
     ///
-    /// Called from the UI thread after the user enters credentials in the
-    /// password prompt modal. The session must already have completed the
-    /// TCP handshake before this is called.
+    /// The credential is tried as a key-file passphrase first (explicit identity
+    /// file, then default key paths). Only if no key succeeds does it fall back
+    /// to SSH password authentication. This handles the common case where a
+    /// server disables password auth but the user's key is passphrase-protected.
     pub fn connect_with_password(host: &Host, password: &str) -> Result<Self, ConnectOutcome> {
         let addr = format!("{}:{}", host.hostname, host.port);
         let tcp = TcpStream::connect_timeout(
@@ -193,9 +208,13 @@ impl SftpConnection {
             .map_err(|e| ConnectOutcome::Failed(format!("SSH handshake failed: {e}")))?;
         session.set_keepalive(true, KEEPALIVE_INTERVAL);
 
-        session
-            .userauth_password(&host.user, password)
-            .map_err(|e| ConnectOutcome::Failed(format!("Password auth failed: {e}")))?;
+        // Try key files with the credential as passphrase first
+        if !Self::try_pubkey_files(&session, host, Some(password)) {
+            // Fall back to SSH password authentication
+            session
+                .userauth_password(&host.user, password)
+                .map_err(|e| ConnectOutcome::Failed(format!("Authentication failed: {e}")))?;
+        }
 
         if !session.authenticated() {
             return Err(ConnectOutcome::Failed(
