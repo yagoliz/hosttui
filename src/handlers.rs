@@ -1,10 +1,14 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use crossterm::event::{Event, KeyCode, KeyModifiers};
+use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
-use crate::app::{App, Mode, Pane, PrefixState};
+use crate::app::{App, Mode, Pane, PrefixState, View};
+use crate::filebrowser::{FileBrowserMode, FileBrowserPane};
 use crate::keys;
+use crate::sftp::{ConnectOutcome, SftpConnection, SftpConnectionStatus};
 use crate::storage::persist;
 
 /// Handles keys while the SSH extra-options sub-dialog is open.
@@ -123,7 +127,7 @@ pub fn handle_hosts_key(
                 }
                 KeyCode::Char('/') => app.start_search(),
                 KeyCode::Char('t')
-                    if modifiers.contains(KeyModifiers::CONTROL) && app.has_active_sessions() =>
+                    if modifiers.contains(KeyModifiers::CONTROL) && app.has_tabs() =>
                 {
                     app.prefix = PrefixState::Pending;
                 }
@@ -131,6 +135,9 @@ pub fn handle_hosts_key(
                     if !modifiers.contains(KeyModifiers::CONTROL) && app.focus == Pane::Hosts =>
                 {
                     app.test_host()
+                }
+                KeyCode::Char('f') if app.focus == Pane::Hosts => {
+                    app.open_file_transfer();
                 }
                 _ => {}
             }
@@ -249,6 +256,16 @@ pub fn handle_session_key(app: &mut App, key: &crossterm::event::KeyEvent) {
                 KeyCode::Char('n') => app.next_tab(),
                 KeyCode::Char('p') => app.prev_tab(),
                 KeyCode::Char('x') => app.close_current_session(),
+                KeyCode::Char('f') => {
+                    if let View::Session(idx) = app.view
+                        && let Some(session) = app.sessions.get(idx)
+                    {
+                        let alias = session.alias.clone();
+                        if let Some(host) = app.config.find(&alias).cloned() {
+                            app.open_file_transfer_for_host(host);
+                        }
+                    }
+                }
                 KeyCode::Char('?') => app.mode = Mode::TabHelp,
                 KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     if let Some(session) = app.active_session_mut() {
@@ -281,4 +298,235 @@ pub fn handle_hosts_paste(app: &mut App, text: &str, path: &Path) -> anyhow::Res
         handle_hosts_key(app, &ev, key.code, key.modifiers, path)?;
     }
     Ok(())
+}
+
+/// Handles keyboard input while a file transfer view is active.
+///
+/// Supports navigation in both local/remote panes, directory entry, parent
+/// traversal, pane switching, sort cycling, hidden file toggling, and the
+/// Ctrl+T tab prefix for switching between views. Modal sub-states like
+/// password prompt and mkdir are handled inline.
+pub fn handle_file_transfer_key(app: &mut App, ev: &Event, code: KeyCode, modifiers: KeyModifiers) {
+    // Handle Ctrl+T prefix first — shared with session/hosts views
+    if matches!(app.prefix, PrefixState::Pending) {
+        app.prefix = PrefixState::Inactive;
+        match code {
+            KeyCode::Char('h') | KeyCode::Char('0') => app.switch_to_hosts(),
+            KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
+                let idx = (c as usize) - ('1' as usize);
+                app.switch_to_session(idx);
+            }
+            KeyCode::Char('n') => app.next_tab(),
+            KeyCode::Char('p') => app.prev_tab(),
+            KeyCode::Char('x') => app.close_current_file_transfer(),
+            KeyCode::Char('?') => app.mode = Mode::TabHelp,
+            _ => {}
+        }
+        return;
+    }
+
+    let Some(ft) = app.active_file_transfer_mut() else {
+        return;
+    };
+
+    match &ft.mode {
+        FileBrowserMode::Normal => {
+            handle_file_transfer_normal(app, code, modifiers);
+        }
+        FileBrowserMode::PasswordPrompt(_) => {
+            handle_file_transfer_password(app, ev, code);
+        }
+        FileBrowserMode::Creating(_) => {
+            handle_file_transfer_mkdir(app, ev, code);
+        }
+        FileBrowserMode::ConfirmTransfer { .. } => {
+            handle_file_transfer_confirm(app, code);
+        }
+        FileBrowserMode::TransferError(_) => match code {
+            KeyCode::Enter | KeyCode::Esc => {
+                let ft = app.active_file_transfer_mut().unwrap();
+                ft.mode = FileBrowserMode::Normal;
+            }
+            _ => {}
+        },
+    }
+}
+
+/// Handles keys in normal file browser navigation mode.
+fn handle_file_transfer_normal(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+    let Some(ft) = app.active_file_transfer_mut() else {
+        return;
+    };
+
+    // Clear transient errors on any keypress
+    ft.error = None;
+
+    match code {
+        KeyCode::Char('j') | KeyCode::Down => ft.move_down(),
+        KeyCode::Char('k') | KeyCode::Up => ft.move_up(),
+        KeyCode::Enter => {
+            ft.enter_dir();
+        }
+        KeyCode::Backspace | KeyCode::Char('h') if !modifiers.contains(KeyModifiers::CONTROL) => {
+            ft.go_parent();
+        }
+        KeyCode::Tab => ft.toggle_focus(),
+        KeyCode::Char('.') => ft.toggle_hidden(),
+        KeyCode::Char('s') => ft.cycle_sort(),
+        KeyCode::Char('S') => ft.toggle_sort_direction(),
+        KeyCode::Char('r') => {
+            ft.refresh_local();
+            ft.refresh_remote();
+        }
+        KeyCode::Char('m') => {
+            ft.mode = FileBrowserMode::Creating(Input::default());
+        }
+        KeyCode::Esc => {
+            app.close_current_file_transfer();
+        }
+        KeyCode::Char('t') if modifiers.contains(KeyModifiers::CONTROL) => {
+            app.prefix = PrefixState::Pending;
+        }
+        _ => {}
+    }
+}
+
+/// Handles keys while the password prompt is shown in the file transfer view.
+fn handle_file_transfer_password(app: &mut App, ev: &Event, code: KeyCode) {
+    let View::FileTransfer(idx) = app.view else {
+        return;
+    };
+    let Some(ft) = app.file_transfers.get_mut(idx) else {
+        return;
+    };
+
+    match code {
+        KeyCode::Esc => {
+            *ft.connection_status.lock().unwrap() =
+                SftpConnectionStatus::Failed("Authentication cancelled".into());
+            ft.mode = FileBrowserMode::Normal;
+        }
+        KeyCode::Enter => {
+            let FileBrowserMode::PasswordPrompt(ref input) = ft.mode else {
+                return;
+            };
+            let password = input.value().to_string();
+            let host = ft.host.clone();
+            let sftp_arc = Arc::clone(&ft.sftp);
+            let status_arc = Arc::clone(&ft.connection_status);
+
+            *status_arc.lock().unwrap() = SftpConnectionStatus::Connecting;
+            ft.mode = FileBrowserMode::Normal;
+
+            std::thread::spawn(move || {
+                match SftpConnection::connect_with_password(&host, &password) {
+                    Ok(conn) => {
+                        let home = conn.home_dir().unwrap_or_else(|_| "/".into());
+                        let entries = conn.list_dir(&home).unwrap_or_default();
+                        *sftp_arc.lock().unwrap() = Some(conn);
+                        *status_arc.lock().unwrap() = SftpConnectionStatus::ConnectedWithData {
+                            home_dir: home,
+                            entries,
+                        };
+                    }
+                    Err(ConnectOutcome::NeedsPassword) => {
+                        *status_arc.lock().unwrap() =
+                            SftpConnectionStatus::Failed("Authentication failed".into());
+                    }
+                    Err(ConnectOutcome::Failed(msg)) => {
+                        *status_arc.lock().unwrap() = SftpConnectionStatus::Failed(msg);
+                    }
+                }
+            });
+        }
+        _ => {
+            if let FileBrowserMode::PasswordPrompt(ref mut input) = ft.mode {
+                input.handle_event(ev);
+            }
+        }
+    }
+}
+
+/// Handles keys while the mkdir input is shown.
+fn handle_file_transfer_mkdir(app: &mut App, ev: &Event, code: KeyCode) {
+    let Some(ft) = app.active_file_transfer_mut() else {
+        return;
+    };
+
+    match code {
+        KeyCode::Esc => {
+            ft.mode = FileBrowserMode::Normal;
+        }
+        KeyCode::Enter => {
+            let FileBrowserMode::Creating(ref input) = ft.mode else {
+                return;
+            };
+            let name = input.value().trim().to_string();
+            if name.is_empty() {
+                ft.mode = FileBrowserMode::Normal;
+                return;
+            }
+
+            match ft.focus {
+                FileBrowserPane::Local => {
+                    let new_path = ft.local_path.join(&name);
+                    match std::fs::create_dir(&new_path) {
+                        Ok(()) => {
+                            ft.mode = FileBrowserMode::Normal;
+                            ft.refresh_local();
+                        }
+                        Err(e) => {
+                            ft.error = Some(format!("mkdir failed: {e}"));
+                            ft.mode = FileBrowserMode::Normal;
+                        }
+                    }
+                }
+                FileBrowserPane::Remote => {
+                    let remote_new = format!("{}/{}", ft.remote_path.trim_end_matches('/'), name);
+                    let result = {
+                        let sftp_guard = ft.sftp.lock().unwrap();
+                        if let Some(ref conn) = *sftp_guard {
+                            conn.sftp()
+                                .mkdir(std::path::Path::new(&remote_new), 0o755)
+                                .map_err(|e| e.to_string())
+                        } else {
+                            Err("Not connected".into())
+                        }
+                    };
+                    match result {
+                        Ok(()) => {
+                            ft.mode = FileBrowserMode::Normal;
+                            ft.refresh_remote();
+                        }
+                        Err(e) => {
+                            ft.error = Some(format!("mkdir failed: {e}"));
+                            ft.mode = FileBrowserMode::Normal;
+                        }
+                    }
+                }
+            }
+        }
+        _ => {
+            if let FileBrowserMode::Creating(ref mut input) = ft.mode {
+                input.handle_event(ev);
+            }
+        }
+    }
+}
+
+/// Handles keys for the transfer confirmation dialog.
+fn handle_file_transfer_confirm(app: &mut App, code: KeyCode) {
+    let Some(ft) = app.active_file_transfer_mut() else {
+        return;
+    };
+    match code {
+        KeyCode::Char('y') | KeyCode::Enter => {
+            // Transfer execution will be implemented in Phase 5
+            ft.mode = FileBrowserMode::Normal;
+        }
+        KeyCode::Char('n') | KeyCode::Esc => {
+            ft.mode = FileBrowserMode::Normal;
+        }
+        _ => {}
+    }
 }

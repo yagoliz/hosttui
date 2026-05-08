@@ -26,6 +26,7 @@ thiserror = "2.0.18"
 toml = "1.1.2"
 textwrap = "0.16"
 tui-input = "0.15.3"
+ssh2 = { version = "0.9", features = ["vendored-openssl"] }
 vt100 = "0.16.2"
 
 [dev-dependencies]

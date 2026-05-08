@@ -13,7 +13,9 @@ use crate::app::{
     self, App, ExtraField, ExtrasEditor, FormState, GroupEntry, InputState, Mode, Pane,
     PrefixState, ScreenPos, TestStatus, View,
 };
+use crate::filebrowser::{FileBrowser, FileBrowserMode, FileBrowserPane};
 use crate::pty::SessionStatus;
+use crate::sftp::SftpConnectionStatus;
 use crate::terminal_widget::TerminalView;
 
 /// Calculates the terminal-screen rectangle inside the session border and tabs.
@@ -69,7 +71,7 @@ pub fn frame_to_screen_clamped(col: u16, row: u16, inner: Rect) -> ScreenPos {
 /// Rendering reads from `App` but does not mutate it. The base view is drawn
 /// first, then the tab bar and any active modal overlays are drawn on top.
 pub fn render(frame: &mut Frame, app: &App) {
-    let has_tabs = app.has_active_sessions();
+    let has_tabs = app.has_tabs();
     let [main_area, tab_bar_area] = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(if has_tabs { 1 } else { 0 }),
@@ -79,6 +81,33 @@ pub fn render(frame: &mut Frame, app: &App) {
     match app.view {
         View::Hosts => render_hosts_view(frame, app, main_area),
         View::Session(idx) => render_session_view(frame, app, idx, main_area),
+        View::FileTransfer(idx) => {
+            if let Some(ft) = app.file_transfers.get(idx) {
+                render_file_transfer_view(frame, ft, main_area);
+                match &ft.mode {
+                    FileBrowserMode::PasswordPrompt(input) => {
+                        render_password_prompt(frame, &ft.alias, input);
+                    }
+                    FileBrowserMode::Creating(input) => {
+                        render_mkdir_prompt(frame, input);
+                    }
+                    FileBrowserMode::ConfirmTransfer {
+                        file, direction, ..
+                    } => {
+                        let dir_label = match direction {
+                            crate::filebrowser::TransferDirection::Upload => "Upload",
+                            crate::filebrowser::TransferDirection::Download => "Download",
+                        };
+                        render_confirm(
+                            frame,
+                            "Confirm Transfer",
+                            &format!("{dir_label} '{file}'?\nFile already exists at destination."),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 
     if has_tabs {
@@ -239,6 +268,330 @@ fn render_session_view(frame: &mut Frame, app: &App, idx: usize, area: Rect) {
     }
 }
 
+/// Renders the dual-pane file transfer view for one `FileBrowser`.
+///
+/// Layout: two panes side-by-side showing local and remote directory listings,
+/// with an optional progress bar row at the bottom when a transfer is active.
+fn render_file_transfer_view(frame: &mut Frame, fb: &FileBrowser, area: Rect) {
+    let [panes_area, status_area] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+
+    let [local_area, remote_area] =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .areas(panes_area);
+
+    render_file_pane(
+        frame,
+        &fb.local_path.to_string_lossy(),
+        &fb.visible_local_entries(),
+        fb.local_selected,
+        fb.focus == FileBrowserPane::Local,
+        true,
+        local_area,
+    );
+
+    let status = fb.connection_status.lock().unwrap().clone();
+    match status {
+        SftpConnectionStatus::Connected | SftpConnectionStatus::ConnectedWithData { .. } => {
+            render_file_pane(
+                frame,
+                &fb.remote_path,
+                &fb.visible_remote_entries(),
+                fb.remote_selected,
+                fb.focus == FileBrowserPane::Remote,
+                false,
+                remote_area,
+            );
+        }
+        SftpConnectionStatus::Connecting => {
+            render_file_pane_message(frame, "Remote", "Connecting...", Color::Yellow, remote_area);
+        }
+        SftpConnectionStatus::NeedsPassword => {
+            render_file_pane_message(
+                frame,
+                "Remote",
+                "Password required...",
+                Color::Yellow,
+                remote_area,
+            );
+        }
+        SftpConnectionStatus::Failed(ref msg) => {
+            render_file_pane_message(frame, "Remote", msg, Color::Red, remote_area);
+        }
+    }
+
+    render_file_transfer_status(frame, fb, status_area);
+}
+
+/// Renders one pane of the file browser with directory listing.
+fn render_file_pane(
+    frame: &mut Frame,
+    path: &str,
+    entries: &[&crate::sftp::FileEntry],
+    selected: usize,
+    focused: bool,
+    is_local: bool,
+    area: Rect,
+) {
+    let label = if is_local { "Local" } else { "Remote" };
+    let title = format!("{label}: {path}");
+
+    let instructions = if focused {
+        Line::from(vec![
+            " j/k ".into(),
+            "Nav".blue().bold(),
+            " Enter ".into(),
+            "Open".blue().bold(),
+            " y ".into(),
+            "Copy".blue().bold(),
+            " . ".into(),
+            "Hidden".blue().bold(),
+            " s ".into(),
+            "Sort ".blue().bold(),
+        ])
+    } else {
+        Line::default()
+    };
+
+    let border_color = if focused {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
+    let block = Block::bordered()
+        .title(Line::from(format!(" {title} ").bold()).left_aligned())
+        .title_bottom(instructions.centered())
+        .border_set(border::THICK)
+        .border_style(Style::default().fg(border_color));
+
+    let inner = block.inner(area);
+
+    let items: Vec<ListItem> = entries
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| {
+            let (name_span, size_str) = if entry.is_dir {
+                (
+                    Span::styled(
+                        format!("{}/", entry.name),
+                        Style::default().fg(Color::Yellow),
+                    ),
+                    String::new(),
+                )
+            } else {
+                (Span::raw(entry.name.clone()), format_size(entry.size))
+            };
+
+            let available_width = inner.width as usize;
+            let name_width = name_span.width();
+            let size_width = size_str.len();
+
+            let padding = if available_width > name_width + size_width + 2 {
+                available_width - name_width - size_width - 1
+            } else {
+                1
+            };
+
+            let style = if i == selected {
+                if focused {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Black).bg(Color::White)
+                }
+            } else {
+                Style::default()
+            };
+
+            ListItem::new(
+                Line::from(vec![
+                    Span::raw(" "),
+                    name_span,
+                    Span::raw(" ".repeat(padding)),
+                    Span::styled(size_str, Style::default().fg(Color::DarkGray)),
+                ])
+                .style(style),
+            )
+        })
+        .collect();
+
+    let list = List::new(items).block(block);
+    let mut state = ListState::default().with_selected(Some(selected));
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+/// Renders a file pane with a centered status message instead of a listing.
+fn render_file_pane_message(
+    frame: &mut Frame,
+    title: &str,
+    message: &str,
+    color: Color,
+    area: Rect,
+) {
+    let block = Block::bordered()
+        .title(Line::from(format!(" {title} ").bold()).left_aligned())
+        .border_set(border::THICK)
+        .border_style(Style::default().fg(Color::DarkGray));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.height > 0 {
+        let msg_area = Rect {
+            x: inner.x,
+            y: inner.y + inner.height / 2,
+            width: inner.width,
+            height: 1,
+        };
+        let line = Line::from(Span::styled(message, Style::default().fg(color))).centered();
+        frame.render_widget(Paragraph::new(line), msg_area);
+    }
+}
+
+/// Renders the status/instructions bar at the bottom of the file transfer view.
+fn render_file_transfer_status(frame: &mut Frame, fb: &FileBrowser, area: Rect) {
+    match &fb.mode {
+        FileBrowserMode::TransferError(msg) => {
+            let line = Line::from(vec![
+                Span::styled(
+                    " Error: ",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(msg.as_str(), Style::default().fg(Color::Red)),
+            ]);
+            frame.render_widget(Paragraph::new(line), area);
+        }
+        _ => {
+            if let Some(ref err) = fb.error {
+                let line = Line::from(vec![
+                    Span::styled(
+                        " Error: ",
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(err.as_str(), Style::default().fg(Color::Red)),
+                ]);
+                frame.render_widget(Paragraph::new(line), area);
+            } else {
+                let sort_label = fb.sort_by.label();
+                let dir_arrow = if fb.sort_ascending { "↑" } else { "↓" };
+                let hidden_label = if fb.show_hidden { "on" } else { "off" };
+                let line = Line::from(vec![
+                    Span::styled(
+                        format!(" Sort: {sort_label}{dir_arrow}"),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        format!("  Hidden: {hidden_label}"),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        "  Tab: switch pane  Esc: close",
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]);
+                frame.render_widget(Paragraph::new(line), area);
+            }
+        }
+    }
+}
+
+/// Formats a byte count into a human-readable string (B, KB, MB, GB).
+fn format_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+/// Renders the password prompt overlay for SFTP authentication.
+fn render_password_prompt(frame: &mut Frame, alias: &str, input: &tui_input::Input) {
+    let area = centered_rect(50, 5, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::bordered()
+        .title(Line::from(format!(" Password for {alias} ").bold()).centered())
+        .title_bottom(
+            Line::from(vec![
+                " Enter ".into(),
+                "Submit".blue().bold(),
+                " Esc ".into(),
+                "Cancel".blue().bold(),
+            ])
+            .centered(),
+        )
+        .border_set(border::THICK)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let masked: String = "*".repeat(input.value().len());
+    let line = Line::from(vec![
+        Span::styled(
+            "Password: ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(masked),
+    ]);
+    frame.render_widget(Paragraph::new(line), inner);
+
+    let cursor_x = inner.x + 10 + input.visual_cursor() as u16;
+    if cursor_x < inner.x + inner.width {
+        frame.set_cursor_position(Position::new(cursor_x, inner.y));
+    }
+}
+
+/// Renders the mkdir input overlay.
+fn render_mkdir_prompt(frame: &mut Frame, input: &tui_input::Input) {
+    let area = centered_rect(50, 5, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::bordered()
+        .title(Line::from(" Create Directory ".bold()).centered())
+        .title_bottom(
+            Line::from(vec![
+                " Enter ".into(),
+                "Create".blue().bold(),
+                " Esc ".into(),
+                "Cancel".blue().bold(),
+            ])
+            .centered(),
+        )
+        .border_set(border::THICK);
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let line = Line::from(vec![
+        Span::styled(
+            "Name: ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(input.value().to_string()),
+    ]);
+    frame.render_widget(Paragraph::new(line), inner);
+
+    let cursor_x = inner.x + 6 + input.visual_cursor() as u16;
+    if cursor_x < inner.x + inner.width {
+        frame.set_cursor_position(Position::new(cursor_x, inner.y));
+    }
+}
+
 /// Renders the bottom host/session tab bar.
 ///
 /// Session tabs include unread and disconnected styling. The host browser is
@@ -283,6 +636,22 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::White)
+        };
+        spans.push(Span::styled(label, style));
+    }
+
+    for (i, ft) in app.file_transfers.iter().enumerate() {
+        spans.push(Span::raw(" "));
+        let is_active = matches!(app.view, View::FileTransfer(idx) if idx == i);
+        let label = format!(" F:{} ", ft.alias);
+
+        let style = if is_active {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Magenta)
         };
         spans.push(Span::styled(label, style));
     }
@@ -547,7 +916,9 @@ fn render_host_list(frame: &mut Frame, app: &App, area: Rect) {
             " c ".into(),
             "Clone".blue().bold(),
             " d ".into(),
-            "Del ".blue().bold(),
+            "Del".blue().bold(),
+            " f ".into(),
+            "Files ".blue().bold(),
         ])
     } else {
         Line::default()

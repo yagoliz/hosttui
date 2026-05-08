@@ -48,4 +48,18 @@ pub enum Error {
         #[source]
         source: std::io::Error,
     },
+
+    #[error("SFTP connection to '{alias}' failed")]
+    SftpConnect {
+        alias: String,
+        #[source]
+        source: ssh2::Error,
+    },
+
+    #[error("SFTP {operation} failed")]
+    SftpOperation {
+        operation: String,
+        #[source]
+        source: ssh2::Error,
+    },
 }

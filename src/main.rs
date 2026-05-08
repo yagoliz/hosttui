@@ -7,7 +7,9 @@ use crossterm::event::{
 };
 
 use hosttui::app::{App, Mode, Selection, View, copy_selection};
-use hosttui::handlers::{handle_hosts_key, handle_hosts_paste, handle_session_key};
+use hosttui::handlers::{
+    handle_file_transfer_key, handle_hosts_key, handle_hosts_paste, handle_session_key,
+};
 use hosttui::storage;
 use hosttui::ui;
 
@@ -23,11 +25,12 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, path: &Path) -> a
             session.update_status();
         }
         app.close_exited_sessions();
+        app.poll_file_transfers();
         app.clear_expired_notifications();
 
         terminal.draw(|frame| ui::render(frame, app))?;
 
-        let timeout = if app.has_active_sessions() || matches!(app.mode, Mode::TestResult { .. }) {
+        let timeout = if app.has_tabs() || matches!(app.mode, Mode::TestResult { .. }) {
             Duration::from_millis(16)
         } else {
             Duration::from_secs(1)
@@ -40,7 +43,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, path: &Path) -> a
         let ev = event::read()?;
 
         if let Event::Resize(cols, rows) = ev {
-            let (session_rows, session_cols) = if app.has_active_sessions() {
+            let (session_rows, session_cols) = if app.has_tabs() {
                 (rows.saturating_sub(3), cols.saturating_sub(2))
             } else {
                 (rows, cols)
@@ -54,7 +57,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, path: &Path) -> a
         if let Event::Mouse(mouse) = ev {
             match mouse.kind {
                 MouseEventKind::ScrollUp => match app.view {
-                    View::Hosts => {}
+                    View::Hosts | View::FileTransfer(_) => {}
                     View::Session(idx) => {
                         app.clear_selection();
                         if let Some(session) = app.sessions.get(idx) {
@@ -63,7 +66,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, path: &Path) -> a
                     }
                 },
                 MouseEventKind::ScrollDown => match app.view {
-                    View::Hosts => {}
+                    View::Hosts | View::FileTransfer(_) => {}
                     View::Session(idx) => {
                         app.clear_selection();
                         if let Some(session) = app.sessions.get(idx) {
@@ -74,7 +77,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, path: &Path) -> a
                 MouseEventKind::Down(MouseButton::Left) => {
                     if matches!(app.view, View::Session(_)) {
                         let (cols, rows) = crossterm::terminal::size()?;
-                        let inner = ui::session_inner_rect(cols, rows, app.has_active_sessions());
+                        let inner = ui::session_inner_rect(cols, rows, app.has_tabs());
                         if let Some(pos) = ui::frame_to_screen(mouse.column, mouse.row, inner) {
                             app.selection = Some(Selection {
                                 anchor: pos,
@@ -86,7 +89,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, path: &Path) -> a
                     }
                 }
                 MouseEventKind::Drag(MouseButton::Left) => {
-                    let has_tabs = app.has_active_sessions();
+                    let has_tabs = app.has_tabs();
                     if let Some(sel) = app.selection.as_mut() {
                         let (cols, rows) = crossterm::terminal::size()?;
                         let inner = ui::session_inner_rect(cols, rows, has_tabs);
@@ -96,7 +99,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, path: &Path) -> a
                 MouseEventKind::Up(MouseButton::Left) => {
                     if let Some(sel) = app.selection {
                         let (cols, rows) = crossterm::terminal::size()?;
-                        let inner = ui::session_inner_rect(cols, rows, app.has_active_sessions());
+                        let inner = ui::session_inner_rect(cols, rows, app.has_tabs());
                         app.selection = Some(Selection {
                             anchor: sel.anchor,
                             end: ui::frame_to_screen_clamped(mouse.column, mouse.row, inner),
@@ -118,6 +121,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, path: &Path) -> a
                         session.paste(&text);
                     }
                 }
+                View::FileTransfer(_) => {}
             }
             continue;
         }
@@ -130,6 +134,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, path: &Path) -> a
             match app.view {
                 View::Hosts => handle_hosts_key(app, &ev, key.code, key.modifiers, path)?,
                 View::Session(_) => handle_session_key(app, &key),
+                View::FileTransfer(_) => {
+                    handle_file_transfer_key(app, &ev, key.code, key.modifiers)
+                }
             }
         }
     }
