@@ -8,8 +8,10 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::filebrowser::FileBrowser;
 use crate::model::{Config, Host};
 use crate::pty::{Session, SessionStatus};
+use crate::sftp::{ConnectOutcome, SftpConnection, SftpConnectionStatus};
 
 /// Copies the active terminal selection to the system clipboard.
 ///
@@ -97,14 +99,16 @@ pub enum Pane {
 
 /// Top-level view currently displayed by the app.
 ///
-/// The host browser and SSH sessions share one event loop. `Session(usize)` is
-/// an index into `App::sessions`, so code that removes sessions must also adjust
-/// this view index to avoid pointing past the end of the vector.
+/// The host browser, SSH sessions, and file transfers share one event loop.
+/// `Session(usize)` indexes into `App::sessions` and `FileTransfer(usize)`
+/// indexes into `App::file_transfers`, so code that removes entries must also
+/// adjust this view index to avoid pointing past the end of the vector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum View {
     #[default]
     Hosts,
     Session(usize),
+    FileTransfer(usize),
 }
 
 /// State for the Ctrl+T session-command prefix.
@@ -580,6 +584,7 @@ pub struct App {
     pub search: Input,
     pub view: View,
     pub sessions: Vec<Session>,
+    pub file_transfers: Vec<FileBrowser>,
     pub prefix: PrefixState,
     pub selection: Option<Selection>,
     clipboard_notice_until: Option<Instant>,
@@ -618,6 +623,7 @@ impl App {
             search: Input::default(),
             view: View::Hosts,
             sessions: Vec::new(),
+            file_transfers: Vec::new(),
             prefix: PrefixState::Inactive,
             selection: None,
             clipboard_notice_until: None,
@@ -1140,6 +1146,120 @@ impl App {
         }
     }
 
+    /// Opens a file transfer tab for the selected host, spawning the SFTP
+    /// connection on a background thread.
+    ///
+    /// Existing file transfers are de-duplicated by alias — if one already
+    /// exists for this host, focus switches to it instead of creating a new one.
+    pub fn open_file_transfer(&mut self) {
+        let Some(host) = self.selected_host().cloned() else {
+            return;
+        };
+        self.open_file_transfer_for_host(host);
+    }
+
+    /// Opens a file transfer for a specific host (used by both hosts view and session view).
+    pub fn open_file_transfer_for_host(&mut self, host: Host) {
+        if let Some(idx) = self.find_file_transfer_by_alias(&host.alias) {
+            self.switch_to_file_transfer(idx);
+            return;
+        }
+
+        let browser = FileBrowser::new(host.clone());
+        let sftp_arc = Arc::clone(&browser.sftp);
+        let status_arc = Arc::clone(&browser.connection_status);
+
+        std::thread::spawn(move || {
+            match SftpConnection::connect(&host) {
+                Ok(conn) => {
+                    let home = conn.home_dir().unwrap_or_else(|_| "/".into());
+                    let entries = conn.list_dir(&home).unwrap_or_default();
+                    let mut sftp_guard = sftp_arc.lock().unwrap();
+                    *sftp_guard = Some(conn);
+                    drop(sftp_guard);
+
+                    let mut status_guard = status_arc.lock().unwrap();
+                    // Store home dir and entries in status so the main loop can pick them up.
+                    // We use a special Connected variant for this.
+                    *status_guard = SftpConnectionStatus::ConnectedWithData {
+                        home_dir: home,
+                        entries,
+                    };
+                }
+                Err(ConnectOutcome::NeedsPassword) => {
+                    *status_arc.lock().unwrap() = SftpConnectionStatus::NeedsPassword;
+                }
+                Err(ConnectOutcome::Failed(msg)) => {
+                    *status_arc.lock().unwrap() = SftpConnectionStatus::Failed(msg);
+                }
+            }
+        });
+
+        self.file_transfers.push(browser);
+        self.switch_to_file_transfer(self.file_transfers.len() - 1);
+    }
+
+    /// Polls file transfer connection and transfer progress.
+    ///
+    /// Handles two concerns each tick:
+    /// 1. SFTP connection status — moves data from background connect thread
+    ///    into the `FileBrowser` so the UI can render it.
+    /// 2. Transfer progress — removes completed/failed/cancelled transfers and
+    ///    refreshes pane listings after successful transfers.
+    pub fn poll_file_transfers(&mut self) {
+        for ft in &mut self.file_transfers {
+            // --- Connection status polling ---
+            let status = ft.connection_status.lock().unwrap().clone();
+            match status {
+                SftpConnectionStatus::ConnectedWithData { home_dir, entries } => {
+                    ft.remote_path = home_dir;
+                    ft.remote_entries = entries;
+                    *ft.connection_status.lock().unwrap() = SftpConnectionStatus::Connected;
+                }
+                SftpConnectionStatus::NeedsPassword
+                    if !matches!(
+                        ft.mode,
+                        crate::filebrowser::FileBrowserMode::PasswordPrompt(_)
+                    ) =>
+                {
+                    ft.mode = crate::filebrowser::FileBrowserMode::PasswordPrompt(
+                        tui_input::Input::default(),
+                    );
+                }
+                _ => {}
+            }
+
+            // --- Transfer progress polling ---
+            let mut needs_refresh = false;
+            let mut failed_msg: Option<String> = None;
+
+            ft.transfers.retain(|handle| {
+                let progress = handle.progress.lock().unwrap();
+                match &progress.status {
+                    crate::transfer::TransferStatus::InProgress => true,
+                    crate::transfer::TransferStatus::Completed => {
+                        needs_refresh = true;
+                        false
+                    }
+                    crate::transfer::TransferStatus::Failed(msg) => {
+                        failed_msg = Some(format!("Transfer failed: {msg}"));
+                        false
+                    }
+                    crate::transfer::TransferStatus::Cancelled => false,
+                }
+            });
+
+            if let Some(msg) = failed_msg {
+                ft.error = Some(msg);
+            }
+
+            if needs_refresh {
+                ft.refresh_local();
+                ft.refresh_remote();
+            }
+        }
+    }
+
     /// Starts a background TCP reachability check for the selected host.
     ///
     /// This tests whether the configured hostname and port accept a TCP
@@ -1257,28 +1377,40 @@ impl App {
     pub fn active_session_mut(&mut self) -> Option<&mut Session> {
         match self.view {
             View::Session(idx) => self.sessions.get_mut(idx),
-            View::Hosts => None,
+            _ => None,
         }
     }
 
-    /// Returns true when at least one embedded SSH session is alive in the app.
-    pub fn has_active_sessions(&self) -> bool {
-        !self.sessions.is_empty()
+    /// Returns true when at least one tab (session or file transfer) exists.
+    pub fn has_tabs(&self) -> bool {
+        !self.sessions.is_empty() || !self.file_transfers.is_empty()
     }
 
-    /// Moves to the next tab in the host/session tab ring.
-    ///
-    /// The host browser participates as a tab so repeated next-tab commands cycle
-    /// through sessions and then back to hosts.
+    /// Moves to the next tab in the ring: Hosts -> Sessions -> FileTransfers -> Hosts.
     pub fn next_tab(&mut self) {
-        if self.sessions.is_empty() {
+        if !self.has_tabs() {
             return;
         }
         match self.view {
-            View::Hosts => self.switch_to_session(0),
+            View::Hosts => {
+                if !self.sessions.is_empty() {
+                    self.switch_to_session(0);
+                } else {
+                    self.switch_to_file_transfer(0);
+                }
+            }
             View::Session(idx) => {
                 if idx + 1 < self.sessions.len() {
                     self.switch_to_session(idx + 1);
+                } else if !self.file_transfers.is_empty() {
+                    self.switch_to_file_transfer(0);
+                } else {
+                    self.switch_to_hosts();
+                }
+            }
+            View::FileTransfer(idx) => {
+                if idx + 1 < self.file_transfers.len() {
+                    self.switch_to_file_transfer(idx + 1);
                 } else {
                     self.switch_to_hosts();
                 }
@@ -1286,15 +1418,29 @@ impl App {
         }
     }
 
-    /// Moves to the previous tab in the host/session tab ring.
+    /// Moves to the previous tab in the ring.
     pub fn prev_tab(&mut self) {
-        if self.sessions.is_empty() {
+        if !self.has_tabs() {
             return;
         }
         match self.view {
-            View::Hosts => self.switch_to_session(self.sessions.len() - 1),
+            View::Hosts => {
+                if !self.file_transfers.is_empty() {
+                    self.switch_to_file_transfer(self.file_transfers.len() - 1);
+                } else {
+                    self.switch_to_session(self.sessions.len() - 1);
+                }
+            }
             View::Session(0) => self.switch_to_hosts(),
             View::Session(idx) => self.switch_to_session(idx - 1),
+            View::FileTransfer(0) => {
+                if !self.sessions.is_empty() {
+                    self.switch_to_session(self.sessions.len() - 1);
+                } else {
+                    self.switch_to_hosts();
+                }
+            }
+            View::FileTransfer(idx) => self.switch_to_file_transfer(idx - 1),
         }
     }
 
@@ -1329,5 +1475,45 @@ impl App {
     /// de-duplication key while the app is running.
     pub fn find_session_by_alias(&self, alias: &str) -> Option<usize> {
         self.sessions.iter().position(|s| s.alias == alias)
+    }
+
+    /// Switches to a file transfer tab by index.
+    pub fn switch_to_file_transfer(&mut self, idx: usize) {
+        if idx < self.file_transfers.len() {
+            self.view = View::FileTransfer(idx);
+        }
+    }
+
+    /// Finds the file transfer tab index for a host alias.
+    pub fn find_file_transfer_by_alias(&self, alias: &str) -> Option<usize> {
+        self.file_transfers.iter().position(|ft| ft.alias == alias)
+    }
+
+    /// Closes the active file transfer tab and returns to the nearest sensible view.
+    pub fn close_current_file_transfer(&mut self) {
+        let View::FileTransfer(idx) = self.view else {
+            return;
+        };
+        if idx >= self.file_transfers.len() {
+            return;
+        }
+        self.file_transfers.remove(idx);
+        if self.file_transfers.is_empty() {
+            if !self.sessions.is_empty() {
+                self.view = View::Session(self.sessions.len() - 1);
+            } else {
+                self.view = View::Hosts;
+            }
+        } else if idx >= self.file_transfers.len() {
+            self.view = View::FileTransfer(self.file_transfers.len() - 1);
+        }
+    }
+
+    /// Returns mutable access to the active file transfer, if the file transfer view is active.
+    pub fn active_file_transfer_mut(&mut self) -> Option<&mut FileBrowser> {
+        match self.view {
+            View::FileTransfer(idx) => self.file_transfers.get_mut(idx),
+            _ => None,
+        }
     }
 }

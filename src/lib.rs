@@ -1,11 +1,14 @@
 pub mod app;
 pub mod error;
+pub mod filebrowser;
 pub mod handlers;
 pub mod keys;
 pub mod model;
 pub mod pty;
+pub mod sftp;
 pub mod ssh;
 pub mod sshconfig;
 pub mod storage;
 pub mod terminal_widget;
+pub mod transfer;
 pub mod ui;
