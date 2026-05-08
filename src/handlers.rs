@@ -518,6 +518,23 @@ fn handle_file_transfer_password(app: &mut App, ev: &Event, code: KeyCode) {
     }
 }
 
+/// Replays pasted text into whichever `tui_input::Input` is active in the
+/// file transfer view (password prompt or mkdir input).
+pub fn handle_file_transfer_paste(app: &mut App, text: &str) {
+    let Some(ft) = app.active_file_transfer_mut() else {
+        return;
+    };
+    let input = match &mut ft.mode {
+        FileBrowserMode::PasswordPrompt(input) => input,
+        FileBrowserMode::Creating(input) => input,
+        _ => return,
+    };
+    for ch in text.chars() {
+        let ev = Event::Key(keys::paste_key(ch));
+        input.handle_event(&ev);
+    }
+}
+
 /// Handles keys while the mkdir input is shown.
 fn handle_file_transfer_mkdir(app: &mut App, ev: &Event, code: KeyCode) {
     let Some(ft) = app.active_file_transfer_mut() else {

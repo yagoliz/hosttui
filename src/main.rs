@@ -8,7 +8,8 @@ use crossterm::event::{
 
 use hosttui::app::{App, Mode, Selection, View, copy_selection};
 use hosttui::handlers::{
-    handle_file_transfer_key, handle_hosts_key, handle_hosts_paste, handle_session_key,
+    handle_file_transfer_key, handle_file_transfer_paste, handle_hosts_key, handle_hosts_paste,
+    handle_session_key,
 };
 use hosttui::storage;
 use hosttui::ui;
@@ -121,7 +122,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, path: &Path) -> a
                         session.paste(&text);
                     }
                 }
-                View::FileTransfer(_) => {}
+                View::FileTransfer(_) => handle_file_transfer_paste(app, &text),
             }
             continue;
         }
