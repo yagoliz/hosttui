@@ -1,15 +1,17 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use crossterm::event::{Event, KeyCode, KeyModifiers};
 use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
 use crate::app::{App, Mode, Pane, PrefixState, View};
-use crate::filebrowser::{FileBrowserMode, FileBrowserPane};
+use crate::filebrowser::{FileBrowser, FileBrowserMode, FileBrowserPane, TransferDirection};
 use crate::keys;
 use crate::sftp::{ConnectOutcome, SftpConnection, SftpConnectionStatus};
 use crate::storage::persist;
+use crate::transfer::{self, TransferRequest};
 
 /// Handles keys while the SSH extra-options sub-dialog is open.
 ///
@@ -352,42 +354,102 @@ pub fn handle_file_transfer_key(app: &mut App, ev: &Event, code: KeyCode, modifi
     }
 }
 
+/// Post-navigation actions that require releasing the `FileBrowser` borrow
+/// before mutating `App`-level state.
+enum PostAction {
+    None,
+    InitiateTransfer,
+    CancelTransfer,
+    Close,
+    SetPrefix,
+}
+
 /// Handles keys in normal file browser navigation mode.
+///
+/// Uses a two-phase pattern: first compute the action while borrowing the
+/// `FileBrowser`, then release that borrow and dispatch actions that need
+/// `&mut App`.
 fn handle_file_transfer_normal(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
-    let Some(ft) = app.active_file_transfer_mut() else {
-        return;
+    let action = {
+        let Some(ft) = app.active_file_transfer_mut() else {
+            return;
+        };
+
+        ft.error = None;
+
+        match code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                ft.move_down();
+                PostAction::None
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                ft.move_up();
+                PostAction::None
+            }
+            KeyCode::Enter => {
+                let is_dir = ft.selected_entry().is_none_or(|e| e.is_dir);
+                if is_dir {
+                    ft.enter_dir();
+                    PostAction::None
+                } else {
+                    PostAction::InitiateTransfer
+                }
+            }
+            KeyCode::Char('y') => PostAction::InitiateTransfer,
+            KeyCode::Char('c') => PostAction::CancelTransfer,
+            KeyCode::Backspace | KeyCode::Char('h')
+                if !modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                ft.go_parent();
+                PostAction::None
+            }
+            KeyCode::Left => {
+                ft.local_focus();
+                PostAction::None
+            }
+            KeyCode::Right => {
+                ft.remote_focus();
+                PostAction::None
+            }
+            KeyCode::Tab => {
+                ft.toggle_focus();
+                PostAction::None
+            }
+            KeyCode::Char('.') => {
+                ft.toggle_hidden();
+                PostAction::None
+            }
+            KeyCode::Char('s') => {
+                ft.cycle_sort();
+                PostAction::None
+            }
+            KeyCode::Char('S') => {
+                ft.toggle_sort_direction();
+                PostAction::None
+            }
+            KeyCode::Char('r') => {
+                ft.refresh_local();
+                ft.refresh_remote();
+                PostAction::None
+            }
+            KeyCode::Char('m') => {
+                ft.mode = FileBrowserMode::Creating(Input::default());
+                PostAction::None
+            }
+            KeyCode::Esc => PostAction::Close,
+            KeyCode::Char('t') if modifiers.contains(KeyModifiers::CONTROL) => {
+                PostAction::SetPrefix
+            }
+            _ => PostAction::None,
+        }
     };
 
-    // Clear transient errors on any keypress
-    ft.error = None;
-
-    match code {
-        KeyCode::Char('j') | KeyCode::Down => ft.move_down(),
-        KeyCode::Char('k') | KeyCode::Up => ft.move_up(),
-        KeyCode::Enter => {
-            ft.enter_dir();
-        }
-        KeyCode::Backspace | KeyCode::Char('h') if !modifiers.contains(KeyModifiers::CONTROL) => {
-            ft.go_parent();
-        }
-        KeyCode::Tab => ft.toggle_focus(),
-        KeyCode::Char('.') => ft.toggle_hidden(),
-        KeyCode::Char('s') => ft.cycle_sort(),
-        KeyCode::Char('S') => ft.toggle_sort_direction(),
-        KeyCode::Char('r') => {
-            ft.refresh_local();
-            ft.refresh_remote();
-        }
-        KeyCode::Char('m') => {
-            ft.mode = FileBrowserMode::Creating(Input::default());
-        }
-        KeyCode::Esc => {
-            app.close_current_file_transfer();
-        }
-        KeyCode::Char('t') if modifiers.contains(KeyModifiers::CONTROL) => {
-            app.prefix = PrefixState::Pending;
-        }
-        _ => {}
+    match action {
+        PostAction::InitiateTransfer => initiate_transfer(app),
+        PostAction::CancelTransfer => cancel_active_transfer(app),
+        PostAction::Close => app.close_current_file_transfer(),
+        PostAction::SetPrefix => app.prefix = PrefixState::Pending,
+        PostAction::None => {}
     }
 }
 
@@ -515,18 +577,108 @@ fn handle_file_transfer_mkdir(app: &mut App, ev: &Event, code: KeyCode) {
 }
 
 /// Handles keys for the transfer confirmation dialog.
+///
+/// The dialog is shown when the destination file already exists. On
+/// confirmation, the transfer starts overwriting the existing file.
 fn handle_file_transfer_confirm(app: &mut App, code: KeyCode) {
     let Some(ft) = app.active_file_transfer_mut() else {
         return;
     };
+
     match code {
         KeyCode::Char('y') | KeyCode::Enter => {
-            // Transfer execution will be implemented in Phase 5
+            let (file, direction) = match &ft.mode {
+                FileBrowserMode::ConfirmTransfer { file, direction } => (file.clone(), *direction),
+                _ => return,
+            };
+
+            let local_path = ft.local_path.join(&file);
+            let remote_path = format!("{}/{}", ft.remote_path.trim_end_matches('/'), file);
+
             ft.mode = FileBrowserMode::Normal;
+            start_transfer(ft, direction, local_path, remote_path);
         }
         KeyCode::Char('n') | KeyCode::Esc => {
             ft.mode = FileBrowserMode::Normal;
         }
         _ => {}
+    }
+}
+
+/// Determines source/destination and starts a file transfer or shows a
+/// confirmation dialog if the destination already exists.
+fn initiate_transfer(app: &mut App) {
+    let Some(ft) = app.active_file_transfer_mut() else {
+        return;
+    };
+
+    let entry = match ft.selected_entry() {
+        Some(e) if !e.is_dir => e.clone(),
+        _ => return,
+    };
+
+    let (direction, local_path, remote_path) = match ft.focus {
+        FileBrowserPane::Local => {
+            let local = ft.local_path.join(&entry.name);
+            let remote = format!("{}/{}", ft.remote_path.trim_end_matches('/'), entry.name);
+            (TransferDirection::Upload, local, remote)
+        }
+        FileBrowserPane::Remote => {
+            let remote = format!("{}/{}", ft.remote_path.trim_end_matches('/'), entry.name);
+            let local = ft.local_path.join(&entry.name);
+            (TransferDirection::Download, local, remote)
+        }
+    };
+
+    let dest_exists = match direction {
+        TransferDirection::Upload => {
+            let sftp_guard = ft.sftp.lock().unwrap();
+            sftp_guard
+                .as_ref()
+                .map(|conn| conn.stat(&remote_path).is_ok())
+                .unwrap_or(false)
+        }
+        TransferDirection::Download => local_path.exists(),
+    };
+
+    if dest_exists {
+        ft.mode = FileBrowserMode::ConfirmTransfer {
+            file: entry.name.clone(),
+            direction,
+        };
+    } else {
+        start_transfer(ft, direction, local_path, remote_path);
+    }
+}
+
+/// Spawns a background transfer thread and pushes the handle into the browser.
+fn start_transfer(
+    ft: &mut FileBrowser,
+    direction: TransferDirection,
+    local_path: PathBuf,
+    remote_path: String,
+) {
+    let request = match direction {
+        TransferDirection::Upload => TransferRequest::Upload {
+            local_path,
+            remote_path,
+        },
+        TransferDirection::Download => TransferRequest::Download {
+            remote_path,
+            local_path,
+        },
+    };
+
+    let handle = transfer::spawn_transfer(Arc::clone(&ft.sftp), request);
+    ft.transfers.push(handle);
+}
+
+/// Signals the most recent active transfer to cancel at the next chunk boundary.
+fn cancel_active_transfer(app: &mut App) {
+    let Some(ft) = app.active_file_transfer_mut() else {
+        return;
+    };
+    if let Some(handle) = ft.transfers.last() {
+        handle.cancel.store(true, Ordering::Relaxed);
     }
 }

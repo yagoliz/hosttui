@@ -6,6 +6,7 @@ use tui_input::Input;
 
 use crate::model::Host;
 use crate::sftp::{FileEntry, SftpConnection, SftpConnectionStatus};
+use crate::transfer::{TransferHandle, TransferProgress, TransferStatus};
 
 /// Which pane of the dual-pane file browser has keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,6 +155,7 @@ pub struct FileBrowser {
     pub sort_ascending: bool,
     pub show_hidden: bool,
     pub mode: FileBrowserMode,
+    pub transfers: Vec<TransferHandle>,
 }
 
 impl FileBrowser {
@@ -183,6 +185,7 @@ impl FileBrowser {
             sort_ascending: true,
             show_hidden: false,
             mode: FileBrowserMode::Normal,
+            transfers: Vec::new(),
         };
 
         browser.local_entries = local_entries;
@@ -387,6 +390,16 @@ impl FileBrowser {
         };
     }
 
+    /// Switches keyboard focus to local.
+    pub fn local_focus(&mut self) {
+        self.focus = FileBrowserPane::Local
+    }
+
+    /// Switches keyboard focus to remote
+    pub fn remote_focus(&mut self) {
+        self.focus = FileBrowserPane::Remote
+    }
+
     /// Toggles visibility of hidden files (names starting with `.`).
     pub fn toggle_hidden(&mut self) {
         self.show_hidden = !self.show_hidden;
@@ -491,6 +504,26 @@ impl FileBrowser {
             self.remote_selected = remote_count.saturating_sub(1);
         }
     }
+
+    /// Returns a snapshot of the most recent transfer's progress, if any.
+    ///
+    /// The UI uses this to decide whether to render the progress bar.
+    /// Only the last transfer is shown — the status bar has room for one line.
+    pub fn active_transfer_progress(&self) -> Option<TransferProgress> {
+        self.transfers
+            .last()
+            .map(|h| h.progress.lock().unwrap().clone())
+    }
+
+    /// Returns `true` if any transfer is currently in progress.
+    pub fn has_active_transfer(&self) -> bool {
+        self.transfers.iter().any(|h| {
+            matches!(
+                h.progress.lock().unwrap().status,
+                TransferStatus::InProgress
+            )
+        })
+    }
 }
 
 #[cfg(test)]
@@ -551,6 +584,7 @@ mod tests {
             sort_ascending: true,
             show_hidden: false,
             mode: FileBrowserMode::Normal,
+            transfers: Vec::new(),
         };
         browser.apply_filters_and_sort_local();
         browser

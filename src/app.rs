@@ -1199,14 +1199,16 @@ impl App {
         self.switch_to_file_transfer(self.file_transfers.len() - 1);
     }
 
-    /// Polls file transfer connection status and applies deferred updates.
+    /// Polls file transfer connection and transfer progress.
     ///
-    /// The SFTP connection runs on a background thread. When it completes,
-    /// the thread stores the remote home directory and initial listing in the
-    /// connection status. This method moves that data into the `FileBrowser`
-    /// so the UI can render it.
+    /// Handles two concerns each tick:
+    /// 1. SFTP connection status — moves data from background connect thread
+    ///    into the `FileBrowser` so the UI can render it.
+    /// 2. Transfer progress — removes completed/failed/cancelled transfers and
+    ///    refreshes pane listings after successful transfers.
     pub fn poll_file_transfers(&mut self) {
         for ft in &mut self.file_transfers {
+            // --- Connection status polling ---
             let status = ft.connection_status.lock().unwrap().clone();
             match status {
                 SftpConnectionStatus::ConnectedWithData { home_dir, entries } => {
@@ -1225,6 +1227,35 @@ impl App {
                     );
                 }
                 _ => {}
+            }
+
+            // --- Transfer progress polling ---
+            let mut needs_refresh = false;
+            let mut failed_msg: Option<String> = None;
+
+            ft.transfers.retain(|handle| {
+                let progress = handle.progress.lock().unwrap();
+                match &progress.status {
+                    crate::transfer::TransferStatus::InProgress => true,
+                    crate::transfer::TransferStatus::Completed => {
+                        needs_refresh = true;
+                        false
+                    }
+                    crate::transfer::TransferStatus::Failed(msg) => {
+                        failed_msg = Some(format!("Transfer failed: {msg}"));
+                        false
+                    }
+                    crate::transfer::TransferStatus::Cancelled => false,
+                }
+            });
+
+            if let Some(msg) = failed_msg {
+                ft.error = Some(msg);
+            }
+
+            if needs_refresh {
+                ft.refresh_local();
+                ft.refresh_remote();
             }
         }
     }

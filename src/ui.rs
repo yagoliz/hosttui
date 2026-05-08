@@ -271,10 +271,23 @@ fn render_session_view(frame: &mut Frame, app: &App, idx: usize, area: Rect) {
 /// Renders the dual-pane file transfer view for one `FileBrowser`.
 ///
 /// Layout: two panes side-by-side showing local and remote directory listings,
-/// with an optional progress bar row at the bottom when a transfer is active.
+/// with an optional progress bar row when a transfer is active, and a status
+/// line at the bottom.
 fn render_file_transfer_view(frame: &mut Frame, fb: &FileBrowser, area: Rect) {
-    let [panes_area, status_area] =
-        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+    let has_progress = fb.has_active_transfer()
+        || fb
+            .active_transfer_progress()
+            .is_some_and(|p| !matches!(p.status, crate::transfer::TransferStatus::InProgress));
+
+    let progress_height = if has_progress { 1 } else { 0 };
+
+    let vertical = Layout::vertical([
+        Constraint::Min(1),
+        Constraint::Length(progress_height),
+        Constraint::Length(1),
+    ])
+    .split(area);
+    let (panes_area, progress_area, status_area) = (vertical[0], vertical[1], vertical[2]);
 
     let [local_area, remote_area] =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -320,7 +333,68 @@ fn render_file_transfer_view(frame: &mut Frame, fb: &FileBrowser, area: Rect) {
         }
     }
 
+    if let Some(progress) = fb.active_transfer_progress() {
+        render_transfer_progress(frame, &progress, progress_area);
+    }
+
     render_file_transfer_status(frame, fb, status_area);
+}
+
+/// Renders the file transfer progress bar.
+///
+/// Format: ` >> Uploading file.txt  45% ████████░░░░  2.1/4.7 MB`
+/// The bar width adapts to available terminal columns.
+fn render_transfer_progress(
+    frame: &mut Frame,
+    progress: &crate::transfer::TransferProgress,
+    area: Rect,
+) {
+    use crate::transfer::TransferStatus;
+
+    let pct = if progress.total_bytes > 0 {
+        ((progress.bytes_transferred as f64 / progress.total_bytes as f64) * 100.0) as u16
+    } else {
+        0
+    };
+
+    let transferred = format_size(progress.bytes_transferred);
+    let total = format_size(progress.total_bytes);
+
+    let prefix = format!(" >> {} {}  {}% ", progress.label, progress.file_name, pct);
+    let suffix = format!("  {}/{} ", transferred, total);
+
+    let bar_width = (area.width as usize)
+        .saturating_sub(prefix.len() + suffix.len())
+        .max(4);
+
+    let filled = (bar_width as u64 * progress.bytes_transferred)
+        .checked_div(progress.total_bytes)
+        .unwrap_or(0) as usize;
+    let empty = bar_width.saturating_sub(filled);
+
+    let bar_color = match progress.status {
+        TransferStatus::InProgress => Color::Cyan,
+        TransferStatus::Completed => Color::Green,
+        TransferStatus::Failed(_) => Color::Red,
+        TransferStatus::Cancelled => Color::Yellow,
+    };
+
+    let line = Line::from(vec![
+        Span::styled(
+            prefix,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("\u{2588}".repeat(filled), Style::default().fg(bar_color)),
+        Span::styled(
+            "\u{2591}".repeat(empty),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(suffix, Style::default().fg(Color::DarkGray)),
+    ]);
+
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 /// Renders one pane of the file browser with directory listing.
@@ -520,7 +594,7 @@ fn render_password_prompt(frame: &mut Frame, alias: &str, input: &tui_input::Inp
     frame.render_widget(Clear, area);
 
     let block = Block::bordered()
-        .title(Line::from(format!(" Password for {alias} ").bold()).centered())
+        .title(Line::from(format!(" Passphrase/Password for {alias} ").bold()).centered())
         .title_bottom(
             Line::from(vec![
                 " Enter ".into(),

@@ -10,4 +10,5 @@ pub mod ssh;
 pub mod sshconfig;
 pub mod storage;
 pub mod terminal_widget;
+pub mod transfer;
 pub mod ui;
