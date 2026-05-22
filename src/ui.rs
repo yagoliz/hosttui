@@ -286,16 +286,21 @@ fn render_file_transfer_view(frame: &mut Frame, fb: &FileBrowser, area: Rect) {
         || fb
             .active_transfer_progress()
             .is_some_and(|p| !matches!(p.status, crate::transfer::TransferStatus::InProgress));
+    let show_search_bar =
+        matches!(fb.mode, FileBrowserMode::Searching(_)) || !fb.focused_search().value().is_empty();
 
     let progress_height = if has_progress { 1 } else { 0 };
+    let search_height = if show_search_bar { 1 } else { 0 };
 
     let vertical = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(progress_height),
+        Constraint::Length(search_height),
         Constraint::Length(1),
     ])
     .split(area);
-    let (panes_area, progress_area, status_area) = (vertical[0], vertical[1], vertical[2]);
+    let (panes_area, progress_area, search_area, status_area) =
+        (vertical[0], vertical[1], vertical[2], vertical[3]);
 
     let [local_area, remote_area] =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -303,11 +308,14 @@ fn render_file_transfer_view(frame: &mut Frame, fb: &FileBrowser, area: Rect) {
 
     render_file_pane(
         frame,
-        &fb.local_path.to_string_lossy(),
+        &file_pane_title(
+            "Local",
+            &fb.local_path.to_string_lossy(),
+            fb.local_search.value(),
+        ),
         &fb.visible_local_entries(),
         fb.local_selected,
         fb.focus == FileBrowserPane::Local,
-        true,
         local_area,
     );
 
@@ -316,11 +324,10 @@ fn render_file_transfer_view(frame: &mut Frame, fb: &FileBrowser, area: Rect) {
         SftpConnectionStatus::Connected | SftpConnectionStatus::ConnectedWithData { .. } => {
             render_file_pane(
                 frame,
-                &fb.remote_path,
+                &file_pane_title("Remote", &fb.remote_path, fb.remote_search.value()),
                 &fb.visible_remote_entries(),
                 fb.remote_selected,
                 fb.focus == FileBrowserPane::Remote,
-                false,
                 remote_area,
             );
         }
@@ -344,6 +351,10 @@ fn render_file_transfer_view(frame: &mut Frame, fb: &FileBrowser, area: Rect) {
 
     if let Some(progress) = fb.active_transfer_progress() {
         render_transfer_progress(frame, &progress, progress_area);
+    }
+
+    if show_search_bar {
+        render_file_search_bar(frame, fb, search_area);
     }
 
     render_file_transfer_status(frame, fb, status_area);
@@ -409,16 +420,12 @@ fn render_transfer_progress(
 /// Renders one pane of the file browser with directory listing.
 fn render_file_pane(
     frame: &mut Frame,
-    path: &str,
+    title: &str,
     entries: &[&crate::sftp::FileEntry],
     selected: usize,
     focused: bool,
-    is_local: bool,
     area: Rect,
 ) {
-    let label = if is_local { "Local" } else { "Remote" };
-    let title = format!("{label}: {path}");
-
     let instructions = if focused {
         Line::from(vec![
             " j/k ".into(),
@@ -429,6 +436,8 @@ fn render_file_pane(
             "Del".blue().bold(),
             " m ".into(),
             "Mkdir".blue().bold(),
+            " / ".into(),
+            "Search".blue().bold(),
             " . ".into(),
             "Hidden".blue().bold(),
             " s ".into(),
@@ -526,6 +535,64 @@ fn render_file_pane(
     let list = List::new(items).block(block);
     let mut state = ListState::default().with_selected(Some(selected));
     frame.render_stateful_widget(list, area, &mut state);
+}
+
+/// Builds pane titles and includes committed query text for filtered panes.
+fn file_pane_title(label: &str, path: &str, search: &str) -> String {
+    let query = search.trim();
+    if query.is_empty() {
+        format!("{label}: {path}")
+    } else {
+        format!("{label}: {path}  /{query}")
+    }
+}
+
+/// Renders the filebrowser search input for the pane that currently owns it.
+fn render_file_search_bar(frame: &mut Frame, fb: &FileBrowser, area: Rect) {
+    let (pane, input, active) = match fb.mode {
+        FileBrowserMode::Searching(FileBrowserPane::Local) => {
+            (FileBrowserPane::Local, &fb.local_search, true)
+        }
+        FileBrowserMode::Searching(FileBrowserPane::Remote) => {
+            (FileBrowserPane::Remote, &fb.remote_search, true)
+        }
+        _ => (fb.focus, fb.focused_search(), false),
+    };
+
+    let label = match pane {
+        FileBrowserPane::Local => "Local",
+        FileBrowserPane::Remote => "Remote",
+    };
+    let prompt_style = if active {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let hint = if active {
+        if input.value().is_empty() {
+            "  (Enter to keep, Esc to clear)"
+        } else {
+            ""
+        }
+    } else {
+        "  (/ to edit)"
+    };
+    let prefix = format!("{label} / ");
+    let line = Line::from(vec![
+        Span::styled(prefix.clone(), prompt_style),
+        Span::styled(input.value().to_string(), Style::default().fg(Color::White)),
+        Span::styled(hint, Style::default().fg(Color::DarkGray)),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
+
+    if active {
+        let cursor_x = area.x + prefix.len() as u16 + input.visual_cursor() as u16;
+        if cursor_x < area.x + area.width {
+            frame.set_cursor_position(Position::new(cursor_x, area.y));
+        }
+    }
 }
 
 /// Renders a file pane with a centered status message instead of a listing.
