@@ -2,6 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo_matcher::{Config as MatcherConfig, Matcher, Utf32Str};
 use tui_input::Input;
 
 use crate::model::Host;
@@ -42,6 +44,7 @@ pub enum FileBrowserMode {
     PasswordPrompt(Input),
     TransferError(String),
     Creating(Input),
+    Searching(FileBrowserPane),
 }
 
 /// Which file attribute to sort directory listings by.
@@ -153,6 +156,8 @@ pub struct FileBrowser {
     pub remote_path: String,
     pub remote_entries: Vec<FileEntry>,
     pub remote_selected: usize,
+    pub local_search: Input,
+    pub remote_search: Input,
 
     pub sftp: Arc<Mutex<Option<SftpConnection>>>,
     pub connection_status: Arc<Mutex<SftpConnectionStatus>>,
@@ -185,6 +190,8 @@ impl FileBrowser {
             remote_path: String::new(),
             remote_entries: Vec::new(),
             remote_selected: 0,
+            local_search: Input::default(),
+            remote_search: Input::default(),
             sftp: Arc::new(Mutex::new(None)),
             connection_status: Arc::new(Mutex::new(SftpConnectionStatus::Connecting)),
             error: None,
@@ -262,6 +269,7 @@ impl FileBrowser {
             Ok(new_entries) => {
                 self.local_path = new_path;
                 self.local_entries = new_entries;
+                self.clear_search_for(FileBrowserPane::Local);
                 self.apply_filters_and_sort_local();
                 self.local_selected = 0;
                 true
@@ -297,6 +305,7 @@ impl FileBrowser {
             Ok(new_entries) => {
                 self.remote_path = new_path;
                 self.remote_entries = new_entries;
+                self.clear_search_for(FileBrowserPane::Remote);
                 self.apply_filters_and_sort_remote();
                 self.remote_selected = 0;
                 true
@@ -337,6 +346,7 @@ impl FileBrowser {
                     .map(|n| n.to_string_lossy().into_owned());
                 self.local_path = parent;
                 self.local_entries = new_entries;
+                self.clear_search_for(FileBrowserPane::Local);
                 self.apply_filters_and_sort_local();
                 self.local_selected = old_name
                     .and_then(|name| {
@@ -378,6 +388,7 @@ impl FileBrowser {
             Ok(new_entries) => {
                 self.remote_path = parent;
                 self.remote_entries = new_entries;
+                self.clear_search_for(FileBrowserPane::Remote);
                 self.apply_filters_and_sort_remote();
                 self.remote_selected = old_name
                     .and_then(|name| {
@@ -413,6 +424,61 @@ impl FileBrowser {
     /// Switches keyboard focus to remote
     pub fn remote_focus(&mut self) {
         self.focus = FileBrowserPane::Remote
+    }
+
+    /// Enters search input mode for the pane that currently has focus.
+    pub fn start_search(&mut self) {
+        self.mode = FileBrowserMode::Searching(self.focus);
+    }
+
+    /// Leaves search input mode while keeping the current pane's query applied.
+    pub fn commit_search(&mut self) {
+        self.mode = FileBrowserMode::Normal;
+    }
+
+    /// Clears the active filebrowser search and returns to normal navigation.
+    pub fn cancel_search(&mut self) {
+        let pane = match self.mode {
+            FileBrowserMode::Searching(pane) => pane,
+            _ => self.focus,
+        };
+        self.clear_search_for(pane);
+        self.mode = FileBrowserMode::Normal;
+    }
+
+    /// Repositions selection after search text changes so it always targets a visible row.
+    pub fn refresh_search(&mut self) {
+        match self.mode {
+            FileBrowserMode::Searching(FileBrowserPane::Local) => self.local_selected = 0,
+            FileBrowserMode::Searching(FileBrowserPane::Remote) => self.remote_selected = 0,
+            _ => {}
+        }
+        self.clamp_selections();
+    }
+
+    /// Returns the search input owned by the active search mode.
+    pub fn active_search_mut(&mut self) -> Option<&mut Input> {
+        match self.mode {
+            FileBrowserMode::Searching(FileBrowserPane::Local) => Some(&mut self.local_search),
+            FileBrowserMode::Searching(FileBrowserPane::Remote) => Some(&mut self.remote_search),
+            _ => None,
+        }
+    }
+
+    /// Returns the search input owned by the focused pane.
+    pub fn focused_search(&self) -> &Input {
+        match self.focus {
+            FileBrowserPane::Local => &self.local_search,
+            FileBrowserPane::Remote => &self.remote_search,
+        }
+    }
+
+    /// Clears the search query for one pane without disturbing the other pane.
+    pub fn clear_search_for(&mut self, pane: FileBrowserPane) {
+        match pane {
+            FileBrowserPane::Local => self.local_search.reset(),
+            FileBrowserPane::Remote => self.remote_search.reset(),
+        }
     }
 
     /// Toggles visibility of hidden files (names starting with `.`).
@@ -501,18 +567,20 @@ impl FileBrowser {
 
     /// Returns local entries filtered by hidden-file visibility.
     pub fn visible_local_entries(&self) -> Vec<&FileEntry> {
-        self.local_entries
-            .iter()
-            .filter(|e| self.show_hidden || !e.name.starts_with('.'))
-            .collect()
+        visible_entries(
+            &self.local_entries,
+            self.show_hidden,
+            self.local_search.value(),
+        )
     }
 
     /// Returns remote entries filtered by hidden-file visibility.
     pub fn visible_remote_entries(&self) -> Vec<&FileEntry> {
-        self.remote_entries
-            .iter()
-            .filter(|e| self.show_hidden || !e.name.starts_with('.'))
-            .collect()
+        visible_entries(
+            &self.remote_entries,
+            self.show_hidden,
+            self.remote_search.value(),
+        )
     }
 
     /// Sorts local entries in place by the current sort field and direction.
@@ -568,6 +636,45 @@ impl FileBrowser {
     }
 }
 
+/// Applies hidden-file visibility and fuzzy search to an already-sorted listing.
+///
+/// Search results keep directories before files, matching normal filebrowser
+/// navigation, while ordering matches by fuzzy score within those groups.
+fn visible_entries<'a>(
+    entries: &'a [FileEntry],
+    show_hidden: bool,
+    search: &str,
+) -> Vec<&'a FileEntry> {
+    let visible = entries
+        .iter()
+        .filter(|e| show_hidden || !e.name.starts_with('.'));
+    let query = search.trim();
+    if query.is_empty() {
+        return visible.collect();
+    }
+
+    let mut matcher = Matcher::new(MatcherConfig::DEFAULT);
+    let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+    let mut hay_buf = Vec::new();
+    let mut scored: Vec<(&FileEntry, u32, usize)> = visible
+        .enumerate()
+        .filter_map(|(idx, entry)| {
+            let hay = Utf32Str::new(&entry.name, &mut hay_buf);
+            pattern
+                .score(hay, &mut matcher)
+                .map(|score| (entry, score, idx))
+        })
+        .collect();
+
+    scored.sort_by(|a, b| {
+        b.0.is_dir
+            .cmp(&a.0.is_dir)
+            .then_with(|| b.1.cmp(&a.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
+    scored.into_iter().map(|(entry, _, _)| entry).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -621,6 +728,8 @@ mod tests {
             remote_path: String::new(),
             remote_entries: Vec::new(),
             remote_selected: 0,
+            local_search: Input::default(),
+            remote_search: Input::default(),
             sftp: Arc::new(Mutex::new(None)),
             connection_status: Arc::new(Mutex::new(SftpConnectionStatus::Connecting)),
             error: None,
@@ -852,6 +961,103 @@ mod tests {
 
         b.toggle_hidden();
         assert_eq!(b.local_selected, 0);
+    }
+
+    // --- Search filtering ---
+
+    #[test]
+    fn local_search_filters_files_and_directories() {
+        let mut b = browser_with_entries(vec![
+            entry("docs", true, 0),
+            entry("download.log", false, 20),
+            entry("notes.txt", false, 10),
+            entry("src", true, 0),
+        ]);
+        b.local_search = Input::new("do".into());
+
+        let visible = b.visible_local_entries();
+        let names: Vec<&str> = visible.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["docs", "download.log"]);
+    }
+
+    #[test]
+    fn remote_search_does_not_filter_local_pane() {
+        let mut b = browser_with_entries(vec![entry("local.txt", false, 10)]);
+        b.remote_entries = vec![
+            entry("configs", true, 0),
+            entry("config.toml", false, 10),
+            entry("notes.txt", false, 20),
+        ];
+        sort_entries(&mut b.remote_entries, b.sort_by, b.sort_ascending);
+        b.remote_search = Input::new("conf".into());
+
+        let local_names: Vec<&str> = b
+            .visible_local_entries()
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
+        let remote_names: Vec<&str> = b
+            .visible_remote_entries()
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
+
+        assert_eq!(local_names, vec!["local.txt"]);
+        assert_eq!(remote_names, vec!["configs", "config.toml"]);
+    }
+
+    #[test]
+    fn search_respects_hidden_file_visibility() {
+        let mut b = browser_with_entries(vec![
+            entry(".env", false, 10),
+            entry("env.sample", false, 20),
+        ]);
+        b.local_search = Input::new("env".into());
+
+        let hidden_filtered: Vec<&str> = b
+            .visible_local_entries()
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
+        assert_eq!(hidden_filtered, vec!["env.sample"]);
+
+        b.toggle_hidden();
+        let mut hidden_visible: Vec<&str> = b
+            .visible_local_entries()
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
+        hidden_visible.sort_unstable();
+        assert_eq!(hidden_visible, vec![".env", "env.sample"]);
+    }
+
+    #[test]
+    fn entering_local_directory_clears_local_search() {
+        let dir = tempfile::tempdir().unwrap();
+        let child = dir.path().join("child");
+        fs::create_dir(&child).unwrap();
+        fs::write(child.join("inside.txt"), "inside").unwrap();
+
+        let mut b = browser_with_entries(vec![entry("child", true, 0)]);
+        b.local_path = dir.path().to_path_buf();
+        b.local_search = Input::new("child".into());
+
+        assert!(b.enter_dir());
+        assert_eq!(b.local_search.value(), "");
+    }
+
+    #[test]
+    fn going_to_local_parent_clears_local_search() {
+        let dir = tempfile::tempdir().unwrap();
+        let child = dir.path().join("child");
+        fs::create_dir(&child).unwrap();
+
+        let mut b = browser_with_entries(vec![]);
+        b.local_path = child;
+        b.local_search = Input::new("anything".into());
+
+        b.go_parent();
+        assert_eq!(b.local_search.value(), "");
     }
 
     // --- Empty directory and edge cases ---

@@ -341,6 +341,9 @@ pub fn handle_file_transfer_key(app: &mut App, ev: &Event, code: KeyCode, modifi
         FileBrowserMode::Creating(_) => {
             handle_file_transfer_mkdir(app, ev, code);
         }
+        FileBrowserMode::Searching(_) => {
+            handle_file_transfer_search(app, ev, code);
+        }
         FileBrowserMode::ConfirmTransfer { .. } => {
             handle_file_transfer_confirm(app, code);
         }
@@ -437,13 +440,24 @@ fn handle_file_transfer_normal(app: &mut App, code: KeyCode, modifiers: KeyModif
                 ft.refresh_remote();
                 PostAction::None
             }
+            KeyCode::Char('/') => {
+                ft.start_search();
+                PostAction::None
+            }
             KeyCode::Char('m') => {
                 ft.mode = FileBrowserMode::Creating(Input::default());
                 PostAction::None
             }
             KeyCode::Char('d') => PostAction::DeleteSelected,
             KeyCode::Char('R') => PostAction::Reconnect,
-            KeyCode::Esc => PostAction::Close,
+            KeyCode::Esc => {
+                if ft.focused_search().value().is_empty() {
+                    PostAction::Close
+                } else {
+                    ft.clear_search_for(ft.focus);
+                    PostAction::None
+                }
+            }
             KeyCode::Char('t') if modifiers.contains(KeyModifiers::CONTROL) => {
                 PostAction::SetPrefix
             }
@@ -459,6 +473,28 @@ fn handle_file_transfer_normal(app: &mut App, code: KeyCode, modifiers: KeyModif
         PostAction::Close => app.close_current_file_transfer(),
         PostAction::SetPrefix => app.prefix = PrefixState::Pending,
         PostAction::None => {}
+    }
+}
+
+/// Handles keys while the focused file pane's search input is active.
+fn handle_file_transfer_search(app: &mut App, ev: &Event, code: KeyCode) {
+    let Some(ft) = app.active_file_transfer_mut() else {
+        return;
+    };
+
+    match code {
+        KeyCode::Esc => ft.cancel_search(),
+        KeyCode::Enter => ft.commit_search(),
+        KeyCode::Down => ft.move_down(),
+        KeyCode::Up => ft.move_up(),
+        _ => {
+            if ft
+                .active_search_mut()
+                .is_some_and(|input| input.handle_event(ev).is_some())
+            {
+                ft.refresh_search();
+            }
+        }
     }
 }
 
@@ -527,11 +563,16 @@ pub fn handle_file_transfer_paste(app: &mut App, text: &str) {
     let input = match &mut ft.mode {
         FileBrowserMode::PasswordPrompt(input) => input,
         FileBrowserMode::Creating(input) => input,
+        FileBrowserMode::Searching(FileBrowserPane::Local) => &mut ft.local_search,
+        FileBrowserMode::Searching(FileBrowserPane::Remote) => &mut ft.remote_search,
         _ => return,
     };
     for ch in text.chars() {
         let ev = Event::Key(keys::paste_key(ch));
         input.handle_event(&ev);
+    }
+    if matches!(ft.mode, FileBrowserMode::Searching(_)) {
+        ft.refresh_search();
     }
 }
 
