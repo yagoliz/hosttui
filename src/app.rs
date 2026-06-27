@@ -1516,4 +1516,85 @@ impl App {
             _ => None,
         }
     }
+
+    /// Computes the next local-shell tab label as the lowest unused `local-N`.
+    ///
+    /// Reusing freed numbers (rather than a monotonic counter) keeps labels
+    /// tidy: closing `local-1` and reopening yields `local-1` again instead of
+    /// an ever-growing index that confuses users.
+    fn next_local_label(&self) -> String {
+        let mut n = 1usize;
+        loop {
+            let candidate = format!("local-{n}");
+            if !self.sessions.iter().any(|s| s.alias == candidate) {
+                return candidate;
+            }
+            n += 1;
+        }
+    }
+
+    /// Opens a tab running the user's local shell on the host machine.
+    ///
+    /// Unlike SSH sessions these are not deduplicated — local shells are cheap
+    /// and users often want several. They are also not hosts, so this never
+    /// mutates `config`, `dirty`, or `last_accessed`. A spawn failure surfaces
+    /// through the same `ConnectError` modal used for SSH, with the shell label
+    /// standing in for the host alias.
+    pub fn open_local_shell(&mut self, rows: u16, cols: u16) {
+        let label = self.next_local_label();
+        match Session::spawn_local(label.clone(), rows, cols) {
+            Ok(session) => {
+                self.sessions.push(session);
+                self.switch_to_session(self.sessions.len() - 1);
+            }
+            Err(e) => {
+                self.mode = Mode::ConnectError {
+                    alias: label,
+                    message: e.to_string(),
+                };
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Config;
+
+    fn test_app() -> App {
+        App::new(Config::new(vec![], vec![]))
+    }
+
+    #[test]
+    fn local_label_uses_lowest_unused_number() {
+        let mut app = test_app();
+
+        // No shells yet -> first label is local-1.
+        assert_eq!(app.next_local_label(), "local-1");
+
+        // Simulate three open shells, then free the middle one.
+        app.sessions
+            .push(Session::spawn_local("local-1".into(), 24, 80).unwrap());
+        app.sessions
+            .push(Session::spawn_local("local-2".into(), 24, 80).unwrap());
+        app.sessions
+            .push(Session::spawn_local("local-3".into(), 24, 80).unwrap());
+        app.sessions.remove(1); // drop local-2
+
+        assert_eq!(app.next_local_label(), "local-2");
+    }
+
+    #[test]
+    fn open_local_shell_does_not_touch_config() {
+        let mut app = test_app();
+        let hosts_before = app.config.clone();
+
+        app.open_local_shell(24, 80);
+
+        assert_eq!(app.sessions.len(), 1);
+        assert_eq!(app.sessions[0].alias, "local-1");
+        assert!(!app.dirty, "local shells must not mark config dirty");
+        assert_eq!(app.config, hosts_before, "config must be unchanged");
+    }
 }

@@ -53,7 +53,7 @@ pub struct Group {
 /// Hosts and groups are private so all mutation goes through methods that keep
 /// cross-references consistent. In particular, deleting or renaming a group
 /// must also update affected hosts.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     hosts: Vec<Host>,
     groups: Vec<Group>,
