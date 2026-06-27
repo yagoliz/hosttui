@@ -940,7 +940,7 @@ fn render_test_result(frame: &mut Frame, alias: &str, status: &TestStatus) {
 
 /// Renders the Ctrl+T tab-command help overlay.
 fn render_tab_help(frame: &mut Frame) {
-    let area = centered_rect(40, 14, frame.area());
+    let area = centered_rect(40, 16, frame.area());
     frame.render_widget(Clear, area);
 
     let block = Block::bordered()
@@ -976,6 +976,10 @@ fn render_tab_help(frame: &mut Frame) {
         Line::from(vec![
             Span::styled("^T f  ", key_style),
             Span::raw("File transfer (from session)"),
+        ]),
+        Line::from(vec![
+            Span::styled("^T s  ", key_style),
+            Span::raw("New local shell"),
         ]),
         Line::from(vec![
             Span::styled("^T ^T ", key_style),

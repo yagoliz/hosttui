@@ -83,6 +83,10 @@ pub fn handle_hosts_key(
                     KeyCode::Char('n') => app.next_tab(),
                     KeyCode::Char('p') => app.prev_tab(),
                     KeyCode::Char('?') => app.mode = Mode::TabHelp,
+                    KeyCode::Char('s') => {
+                        let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+                        app.open_local_shell(rows.saturating_sub(3), cols.saturating_sub(2));
+                    }
                     _ => {}
                 }
                 return Ok(());
@@ -128,9 +132,7 @@ pub fn handle_hosts_key(
                     app.start_adding_group();
                 }
                 KeyCode::Char('/') => app.start_search(),
-                KeyCode::Char('t')
-                    if modifiers.contains(KeyModifiers::CONTROL) && app.has_tabs() =>
-                {
+                KeyCode::Char('t') if modifiers.contains(KeyModifiers::CONTROL) => {
                     app.prefix = PrefixState::Pending;
                 }
                 KeyCode::Char('t')
@@ -269,6 +271,10 @@ pub fn handle_session_key(app: &mut App, key: &crossterm::event::KeyEvent) {
                     }
                 }
                 KeyCode::Char('?') => app.mode = Mode::TabHelp,
+                KeyCode::Char('s') => {
+                    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+                    app.open_local_shell(rows.saturating_sub(3), cols.saturating_sub(2));
+                }
                 KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     if let Some(session) = app.active_session_mut() {
                         session.write(&[0x14]);
@@ -322,6 +328,10 @@ pub fn handle_file_transfer_key(app: &mut App, ev: &Event, code: KeyCode, modifi
             KeyCode::Char('p') => app.prev_tab(),
             KeyCode::Char('x') => app.close_current_file_transfer(),
             KeyCode::Char('?') => app.mode = Mode::TabHelp,
+            KeyCode::Char('s') => {
+                let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+                app.open_local_shell(rows.saturating_sub(3), cols.saturating_sub(2));
+            }
             _ => {}
         }
         return;
