@@ -55,6 +55,33 @@ impl Session {
     /// The master side stays in hosttui: writes send user input to SSH, and a
     /// reader thread parses SSH output into the in-memory terminal screen.
     pub fn spawn(host: &Host, rows: u16, cols: u16) -> io::Result<Self> {
+        let args = ssh::ssh_args(host);
+        let mut cmd = CommandBuilder::new("ssh");
+        for arg in &args {
+            cmd.arg(arg);
+        }
+        Self::spawn_command(cmd, host.alias.clone(), rows, cols)
+    }
+
+    /// Spawns the user's local shell inside a new PTY.
+    ///
+    /// Used for "local terminal" tabs that run on the machine hosttui itself
+    /// runs on, rather than over SSH. We honor `$SHELL` so the user gets their
+    /// configured shell, falling back to `/bin/sh` which is guaranteed present
+    /// on POSIX systems. The shell is interactive because it owns a controlling
+    /// tty, so no extra flags are needed.
+    pub fn spawn_local(alias: String, rows: u16, cols: u16) -> io::Result<Self> {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        let cmd = CommandBuilder::new(shell);
+        Self::spawn_command(cmd, alias, rows, cols)
+    }
+
+    /// Shared PTY setup: opens a pty of the given size, spawns `cmd` on the
+    /// slave, and starts the background reader thread feeding the vt100 parser.
+    ///
+    /// Both SSH sessions and local shells differ only in which command they
+    /// run, so the terminal plumbing is factored here to avoid duplication.
+    fn spawn_command(cmd: CommandBuilder, alias: String, rows: u16, cols: u16) -> io::Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -64,12 +91,6 @@ impl Session {
                 pixel_height: 0,
             })
             .map_err(io::Error::other)?;
-
-        let args = ssh::ssh_args(host);
-        let mut cmd = CommandBuilder::new("ssh");
-        for arg in &args {
-            cmd.arg(arg);
-        }
 
         let child = pair.slave.spawn_command(cmd).map_err(io::Error::other)?;
 
@@ -97,7 +118,7 @@ impl Session {
         };
 
         Ok(Session {
-            alias: host.alias.clone(),
+            alias,
             master: pair.master,
             writer,
             parser,
@@ -368,6 +389,34 @@ impl Drop for Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spawn_local_runs_a_shell() {
+        // Skip when the sandbox has no usable shell rather than failing spuriously.
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        if !std::path::Path::new(&shell).exists() {
+            eprintln!("skipping: no shell at {shell}");
+            return;
+        }
+
+        let mut session =
+            Session::spawn_local("local-1".to_string(), 24, 80).expect("spawn local shell");
+        assert_eq!(session.alias, "local-1");
+        assert!(matches!(session.status(), SessionStatus::Running));
+
+        // Ask the shell to print a sentinel, then poll the parsed screen for it.
+        session.write(b"printf hosttui_ok\n");
+        let mut found = false;
+        for _ in 0..50 {
+            let screen = session.screen();
+            if screen.contents().contains("hosttui_ok") {
+                found = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(found, "expected sentinel output from local shell");
+    }
 
     struct SharedBuf(Arc<Mutex<Vec<u8>>>);
 
