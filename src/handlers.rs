@@ -9,6 +9,7 @@ use tui_input::backend::crossterm::EventHandler;
 use crate::app::{App, Mode, Pane, PrefixState, View};
 use crate::filebrowser::{FileBrowser, FileBrowserMode, FileBrowserPane, TransferDirection};
 use crate::keys;
+use crate::pty::SessionKind;
 use crate::sftp::{ConnectOutcome, SftpConnection, SftpConnectionStatus};
 use crate::storage::persist;
 use crate::transfer::{self, TransferRequest};
@@ -263,6 +264,7 @@ pub fn handle_session_key(app: &mut App, key: &crossterm::event::KeyEvent) {
                 KeyCode::Char('f') => {
                     if let View::Session(idx) = app.view
                         && let Some(session) = app.sessions.get(idx)
+                        && session.kind == SessionKind::Ssh
                     {
                         let alias = session.alias.clone();
                         if let Some(host) = app.config.find(&alias).cloned() {

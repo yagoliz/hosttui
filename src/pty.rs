@@ -10,6 +10,18 @@ use crate::ssh;
 
 type TerminalParser = vt100::Parser<TerminalCallbacks>;
 
+/// Distinguishes an SSH session from a local-shell session.
+///
+/// Local shells reuse the same `Session` plumbing as SSH but must not
+/// participate in alias-based dedup (their `local-N` label is synthetic, not a
+/// user-facing host alias). The kind lets callers filter by purpose instead of
+/// guessing from the alias string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionKind {
+    Ssh,
+    Local,
+}
+
 /// Runtime status for an embedded SSH session.
 ///
 /// `Exited` stores a simplified exit code because `portable-pty` abstracts over
@@ -38,6 +50,8 @@ impl std::fmt::Debug for Session {
 /// directly from the PTY.
 pub struct Session {
     pub alias: String,
+    /// Distinguishes SSH from local-shell sessions for dedup and label allocation.
+    pub kind: SessionKind,
     master: Box<dyn MasterPty + Send>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     parser: Arc<Mutex<TerminalParser>>,
@@ -60,7 +74,7 @@ impl Session {
         for arg in &args {
             cmd.arg(arg);
         }
-        Self::spawn_command(cmd, host.alias.clone(), rows, cols)
+        Self::spawn_command(cmd, host.alias.clone(), SessionKind::Ssh, rows, cols)
     }
 
     /// Spawns the user's local shell inside a new PTY.
@@ -73,7 +87,7 @@ impl Session {
     pub fn spawn_local(alias: String, rows: u16, cols: u16) -> io::Result<Self> {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
         let cmd = CommandBuilder::new(shell);
-        Self::spawn_command(cmd, alias, rows, cols)
+        Self::spawn_command(cmd, alias, SessionKind::Local, rows, cols)
     }
 
     /// Shared PTY setup: opens a pty of the given size, spawns `cmd` on the
@@ -81,7 +95,13 @@ impl Session {
     ///
     /// Both SSH sessions and local shells differ only in which command they
     /// run, so the terminal plumbing is factored here to avoid duplication.
-    fn spawn_command(cmd: CommandBuilder, alias: String, rows: u16, cols: u16) -> io::Result<Self> {
+    fn spawn_command(
+        cmd: CommandBuilder,
+        alias: String,
+        kind: SessionKind,
+        rows: u16,
+        cols: u16,
+    ) -> io::Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -119,6 +139,7 @@ impl Session {
 
         Ok(Session {
             alias,
+            kind,
             master: pair.master,
             writer,
             parser,

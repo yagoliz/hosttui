@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use crate::filebrowser::FileBrowser;
 use crate::model::{Config, Host};
-use crate::pty::{Session, SessionStatus};
+use crate::pty::{Session, SessionKind, SessionStatus};
 use crate::sftp::{ConnectOutcome, SftpConnection, SftpConnectionStatus};
 
 /// Copies the active terminal selection to the system clipboard.
@@ -1474,7 +1474,9 @@ impl App {
     /// Aliases are unique in config, so they also serve as a stable session
     /// de-duplication key while the app is running.
     pub fn find_session_by_alias(&self, alias: &str) -> Option<usize> {
-        self.sessions.iter().position(|s| s.alias == alias)
+        self.sessions
+            .iter()
+            .position(|s| s.kind == SessionKind::Ssh && s.alias == alias)
     }
 
     /// Switches to a file transfer tab by index.
@@ -1526,7 +1528,11 @@ impl App {
         let mut n = 1usize;
         loop {
             let candidate = format!("local-{n}");
-            if !self.sessions.iter().any(|s| s.alias == candidate) {
+            if !self
+                .sessions
+                .iter()
+                .any(|s| s.kind == SessionKind::Local && s.alias == candidate)
+            {
                 return candidate;
             }
             n += 1;
@@ -1596,5 +1602,16 @@ mod tests {
         assert_eq!(app.sessions[0].alias, "local-1");
         assert!(!app.dirty, "local shells must not mark config dirty");
         assert_eq!(app.config, hosts_before, "config must be unchanged");
+    }
+
+    #[test]
+    fn find_session_by_alias_ignores_local_shells() {
+        // A local shell labeled "local-1" must NOT be treated as the SSH host
+        // "local-1": SSH dedup must skip it so opening that host still connects.
+        let mut app = test_app();
+        app.sessions
+            .push(Session::spawn_local("local-1".into(), 24, 80).unwrap());
+
+        assert_eq!(app.find_session_by_alias("local-1"), None);
     }
 }
