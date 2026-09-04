@@ -1,6 +1,6 @@
 [package]
 name = "hosttui"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2024"
 description = "A TUI to manage SSH configuration: browse hosts, organize them in groups, and connect"
 license = "MIT"
@@ -27,6 +27,7 @@ toml = "1.1.2"
 textwrap = "0.16"
 tui-input = "0.15.3"
 ssh2 = { version = "0.9", features = ["vendored-openssl"] }
+unicode-width = "0.2"
 vt100 = "0.16.2"
 
 [dev-dependencies]

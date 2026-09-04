@@ -6,6 +6,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Clear, List, ListItem, ListState, Paragraph},
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use std::sync::atomic::Ordering;
 
@@ -360,10 +361,98 @@ fn render_file_transfer_view(frame: &mut Frame, fb: &FileBrowser, area: Rect) {
     render_file_transfer_status(frame, fb, status_area);
 }
 
-/// Renders the file transfer progress bar.
+const TRANSFER_LABEL_WIDTH: usize = 18;
+const TRANSFER_FILE_NAME_WIDTH: usize = 20;
+const TRANSFER_SIZE_WIDTH: usize = 9;
+
+/// Stable text and bar dimensions for one rendered transfer progress row.
+struct TransferProgressLayout {
+    prefix: String,
+    suffix: String,
+    bar_width: usize,
+    filled: usize,
+}
+
+/// Truncates text with an ellipsis or pads it to an exact terminal-cell width.
 ///
-/// Format: ` >> Uploading file.txt  45% ████████░░░░  2.1/4.7 MB`
-/// The bar width adapts to available terminal columns.
+/// Filenames can contain wide Unicode characters, so byte and character counts
+/// cannot keep the following progress bar in a stable screen column.
+fn fit_text_column(value: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let value_width = UnicodeWidthStr::width(value);
+    if value_width <= width {
+        let mut fitted = String::with_capacity(value.len() + width - value_width);
+        fitted.push_str(value);
+        fitted.extend(std::iter::repeat_n(' ', width - value_width));
+        return fitted;
+    }
+
+    let ellipsis = '…';
+    let ellipsis_width = UnicodeWidthChar::width(ellipsis).unwrap_or(1);
+    let content_width = width.saturating_sub(ellipsis_width);
+    let mut fitted = String::with_capacity(width);
+    let mut used = 0;
+
+    for ch in value.chars() {
+        let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + char_width > content_width {
+            break;
+        }
+        fitted.push(ch);
+        used += char_width;
+    }
+
+    fitted.push(ellipsis);
+    let fitted_width = UnicodeWidthStr::width(fitted.as_str());
+    fitted.extend(std::iter::repeat_n(' ', width.saturating_sub(fitted_width)));
+    fitted
+}
+
+/// Computes fixed-width progress columns and a fluid bar for the available row.
+fn transfer_progress_layout(
+    progress: &crate::transfer::TransferProgress,
+    area_width: u16,
+) -> TransferProgressLayout {
+    let pct = if progress.total_bytes > 0 {
+        ((progress.bytes_transferred as u128 * 100) / progress.total_bytes as u128).min(100) as u16
+    } else {
+        0
+    };
+
+    let label = fit_text_column(&progress.label, TRANSFER_LABEL_WIDTH);
+    let file_name = fit_text_column(&progress.file_name, TRANSFER_FILE_NAME_WIDTH);
+    let transferred = fit_text_column(
+        &format_size(progress.bytes_transferred),
+        TRANSFER_SIZE_WIDTH,
+    );
+    let total = fit_text_column(&format_size(progress.total_bytes), TRANSFER_SIZE_WIDTH);
+    let prefix = format!(" >> {label} {file_name}  {pct:>3}% ");
+    let suffix = format!("  {transferred}/{total}");
+    let occupied_width =
+        UnicodeWidthStr::width(prefix.as_str()) + UnicodeWidthStr::width(suffix.as_str());
+    let bar_width = (area_width as usize).saturating_sub(occupied_width);
+    let filled = if progress.total_bytes > 0 {
+        ((bar_width as u128 * progress.bytes_transferred as u128) / progress.total_bytes as u128)
+            .min(bar_width as u128) as usize
+    } else {
+        0
+    };
+
+    TransferProgressLayout {
+        prefix,
+        suffix,
+        bar_width,
+        filled,
+    }
+}
+
+/// Renders transfer progress with stable text columns and a fluid bar.
+///
+/// The filename and byte fields retain their widths as a folder transfer moves
+/// between files, while the bar consumes every remaining terminal column.
 fn render_transfer_progress(
     frame: &mut Frame,
     progress: &crate::transfer::TransferProgress,
@@ -371,26 +460,8 @@ fn render_transfer_progress(
 ) {
     use crate::transfer::TransferStatus;
 
-    let pct = if progress.total_bytes > 0 {
-        ((progress.bytes_transferred as f64 / progress.total_bytes as f64) * 100.0) as u16
-    } else {
-        0
-    };
-
-    let transferred = format_size(progress.bytes_transferred);
-    let total = format_size(progress.total_bytes);
-
-    let prefix = format!(" >> {} {}  {}% ", progress.label, progress.file_name, pct);
-    let suffix = format!("  {}/{} ", transferred, total);
-
-    let bar_width = (area.width as usize)
-        .saturating_sub(prefix.len() + suffix.len())
-        .max(4);
-
-    let filled = (bar_width as u64 * progress.bytes_transferred)
-        .checked_div(progress.total_bytes)
-        .unwrap_or(0) as usize;
-    let empty = bar_width.saturating_sub(filled);
+    let layout = transfer_progress_layout(progress, area.width);
+    let empty = layout.bar_width.saturating_sub(layout.filled);
 
     let bar_color = match progress.status {
         TransferStatus::InProgress => Color::Cyan,
@@ -401,17 +472,20 @@ fn render_transfer_progress(
 
     let line = Line::from(vec![
         Span::styled(
-            prefix,
+            layout.prefix,
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("\u{2588}".repeat(filled), Style::default().fg(bar_color)),
+        Span::styled(
+            "\u{2588}".repeat(layout.filled),
+            Style::default().fg(bar_color),
+        ),
         Span::styled(
             "\u{2591}".repeat(empty),
             Style::default().fg(Color::DarkGray),
         ),
-        Span::styled(suffix, Style::default().fg(Color::DarkGray)),
+        Span::styled(layout.suffix, Style::default().fg(Color::DarkGray)),
     ]);
 
     frame.render_widget(Paragraph::new(line), area);
@@ -426,12 +500,19 @@ fn render_file_pane(
     focused: bool,
     area: Rect,
 ) {
+    let copy_label = entries.get(selected).map_or("Copy", |entry| {
+        if entry.is_dir {
+            "Copy folder"
+        } else {
+            "Copy file"
+        }
+    });
     let instructions = if focused {
         Line::from(vec![
             " j/k ".into(),
             "Nav".blue().bold(),
             " y ".into(),
-            "Copy".blue().bold(),
+            copy_label.blue().bold(),
             " d ".into(),
             "Del".blue().bold(),
             " m ".into(),
@@ -1538,4 +1619,104 @@ fn render_confirm(frame: &mut Frame, title: &str, message: &str) {
 
     let paragraph = Paragraph::new(text).block(block);
     frame.render_widget(paragraph, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transfer::{TransferProgress, TransferStatus};
+    use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn progress_layout_stays_fixed_across_filenames_and_byte_units() {
+        let short = TransferProgress {
+            file_name: "a.txt".into(),
+            label: "Downloading folder".into(),
+            bytes_transferred: 512,
+            total_bytes: 1024,
+            status: TransferStatus::InProgress,
+        };
+        let long = TransferProgress {
+            file_name: "a-very-long-資料-archive-name.tar.gz".into(),
+            label: "Downloading folder".into(),
+            bytes_transferred: 5 * 1024 * 1024,
+            total_bytes: 10 * 1024 * 1024,
+            status: TransferStatus::InProgress,
+        };
+
+        let short_layout = transfer_progress_layout(&short, 120);
+        let long_layout = transfer_progress_layout(&long, 120);
+
+        assert_eq!(
+            UnicodeWidthStr::width(short_layout.prefix.as_str()),
+            UnicodeWidthStr::width(long_layout.prefix.as_str())
+        );
+        assert_eq!(
+            UnicodeWidthStr::width(short_layout.suffix.as_str()),
+            UnicodeWidthStr::width(long_layout.suffix.as_str())
+        );
+        let expected_bar_width = 120
+            - UnicodeWidthStr::width(short_layout.prefix.as_str())
+            - UnicodeWidthStr::width(short_layout.suffix.as_str());
+        assert_eq!(short_layout.bar_width, expected_bar_width);
+        assert_eq!(long_layout.bar_width, expected_bar_width);
+        assert!(expected_bar_width > 16);
+        assert!(long_layout.prefix.contains('…'));
+
+        let render = |progress: &TransferProgress| {
+            let backend = TestBackend::new(120, 1);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| {
+                    let area = frame.area();
+                    render_transfer_progress(frame, progress, area);
+                })
+                .unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol().to_string())
+                .collect::<Vec<_>>()
+        };
+        let short_cells = render(&short);
+        let long_cells = render(&long);
+        let short_bar_start = short_cells
+            .iter()
+            .position(|symbol| symbol == "\u{2588}" || symbol == "\u{2591}")
+            .unwrap();
+        let long_bar_start = long_cells
+            .iter()
+            .position(|symbol| symbol == "\u{2588}" || symbol == "\u{2591}")
+            .unwrap();
+
+        assert_eq!(short_bar_start, long_bar_start);
+        assert_eq!(
+            short_cells
+                .iter()
+                .filter(|symbol| symbol.as_str() == "\u{2588}" || symbol.as_str() == "\u{2591}")
+                .count(),
+            expected_bar_width
+        );
+    }
+
+    #[test]
+    fn progress_bar_uses_all_remaining_width() {
+        let progress = TransferProgress {
+            file_name: "archive.tar.gz".into(),
+            label: "Downloading folder".into(),
+            bytes_transferred: 75,
+            total_bytes: 100,
+            status: TransferStatus::InProgress,
+        };
+
+        let narrow = transfer_progress_layout(&progress, 80);
+        let wide = transfer_progress_layout(&progress, 120);
+
+        assert!(narrow.bar_width > 0);
+        assert_eq!(wide.bar_width - narrow.bar_width, 40);
+        assert!(narrow.filled <= narrow.bar_width);
+        assert!(wide.filled <= wide.bar_width);
+    }
 }

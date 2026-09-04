@@ -4,9 +4,33 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use crate::sftp::SftpConnection;
+use crate::sftp::{FileEntry, SftpConnection};
 
 const CHUNK_SIZE: usize = 32 * 1024;
+/// Remote operations needed to walk and download a directory tree.
+///
+/// Keeping this boundary narrower than `SftpConnection` makes the recursive
+/// behavior deterministic to test without changing the production SFTP path.
+trait RemoteDirectorySource {
+    type File: Read;
+
+    fn list_dir(&self, path: &str) -> Result<Vec<FileEntry>, String>;
+    fn open_file(&self, path: &str) -> Result<Self::File, String>;
+}
+
+impl RemoteDirectorySource for SftpConnection {
+    type File = ssh2::File;
+
+    fn list_dir(&self, path: &str) -> Result<Vec<FileEntry>, String> {
+        SftpConnection::list_dir(self, path).map_err(|e| e.to_string())
+    }
+
+    fn open_file(&self, path: &str) -> Result<Self::File, String> {
+        self.sftp()
+            .open(Path::new(path))
+            .map_err(|e| format!("open remote '{path}': {e}"))
+    }
+}
 
 /// What to transfer and in which direction.
 #[derive(Debug, Clone)]
@@ -98,7 +122,7 @@ pub fn spawn_transfer(
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
-            "Uploading dir".to_string(),
+            "Uploading folder".to_string(),
         ),
         TransferRequest::DownloadDir { remote_path, .. } => (
             remote_path
@@ -106,7 +130,7 @@ pub fn spawn_transfer(
                 .next()
                 .unwrap_or(remote_path)
                 .to_string(),
-            "Downloading dir".to_string(),
+            "Downloading folder".to_string(),
         ),
     };
 
@@ -409,8 +433,8 @@ fn run_download_dir(
 }
 
 /// Inner recursive helper for directory download (runs while holding the SFTP mutex).
-fn download_dir_inner(
-    conn: &SftpConnection,
+fn download_dir_inner<R: RemoteDirectorySource>(
+    conn: &R,
     remote_dir: &str,
     local_dir: &Path,
     progress: &Arc<Mutex<TransferProgress>>,
@@ -418,7 +442,7 @@ fn download_dir_inner(
 ) -> Result<(), String> {
     std::fs::create_dir_all(local_dir).map_err(|e| format!("mkdir local: {e}"))?;
 
-    let entries = conn.list_dir(remote_dir).map_err(|e| e.to_string())?;
+    let entries = conn.list_dir(remote_dir)?;
 
     for entry in &entries {
         if cancel.load(Ordering::Relaxed) {
@@ -433,10 +457,7 @@ fn download_dir_inner(
         } else {
             progress.lock().unwrap().file_name = entry.name.clone();
 
-            let mut remote_file = conn
-                .sftp()
-                .open(Path::new(&child_remote))
-                .map_err(|e| format!("open remote: {e}"))?;
+            let mut remote_file = conn.open_file(&child_remote)?;
             let mut local_file =
                 std::fs::File::create(&child_local).map_err(|e| format!("create local: {e}"))?;
 
@@ -479,8 +500,8 @@ fn dir_total_bytes(path: &Path) -> u64 {
 }
 
 /// Walks a remote directory tree via SFTP and sums all file sizes.
-fn remote_dir_total_bytes(conn: &SftpConnection, path: &str) -> Result<u64, String> {
-    let entries = conn.list_dir(path).map_err(|e| e.to_string())?;
+fn remote_dir_total_bytes<R: RemoteDirectorySource>(conn: &R, path: &str) -> Result<u64, String> {
+    let entries = conn.list_dir(path)?;
     let mut total = 0u64;
     for entry in &entries {
         if entry.is_dir {
@@ -496,56 +517,8 @@ fn remote_dir_total_bytes(conn: &SftpConnection, path: &str) -> Result<u64, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn transfer_progress_initial_state() {
-        let progress = TransferProgress {
-            file_name: "test.txt".into(),
-            label: "Downloading".into(),
-            bytes_transferred: 0,
-            total_bytes: 1024,
-            status: TransferStatus::InProgress,
-        };
-        assert_eq!(progress.status, TransferStatus::InProgress);
-        assert_eq!(progress.bytes_transferred, 0);
-        assert_eq!(progress.total_bytes, 1024);
-    }
-
-    #[test]
-    fn transfer_status_variants() {
-        assert_eq!(TransferStatus::InProgress, TransferStatus::InProgress);
-        assert_eq!(TransferStatus::Completed, TransferStatus::Completed);
-        assert_eq!(TransferStatus::Cancelled, TransferStatus::Cancelled);
-
-        let failed = TransferStatus::Failed("disk full".into());
-        assert!(matches!(failed, TransferStatus::Failed(ref msg) if msg == "disk full"));
-    }
-
-    #[test]
-    fn cancel_flag_cooperative() {
-        let cancel = Arc::new(AtomicBool::new(false));
-        assert!(!cancel.load(Ordering::Relaxed));
-        cancel.store(true, Ordering::Relaxed);
-        assert!(cancel.load(Ordering::Relaxed));
-    }
-
-    #[test]
-    fn transfer_request_upload() {
-        let req = TransferRequest::Upload {
-            local_path: PathBuf::from("/tmp/file.txt"),
-            remote_path: "/home/user/file.txt".into(),
-        };
-        assert!(matches!(req, TransferRequest::Upload { .. }));
-    }
-
-    #[test]
-    fn transfer_request_download() {
-        let req = TransferRequest::Download {
-            remote_path: "/home/user/file.txt".into(),
-            local_path: PathBuf::from("/tmp/file.txt"),
-        };
-        assert!(matches!(req, TransferRequest::Download { .. }));
-    }
+    use std::collections::HashMap;
+    use std::io::Cursor;
 
     #[test]
     fn spawn_transfer_sets_label_upload() {
@@ -636,7 +609,7 @@ mod tests {
             },
         );
         let progress = handle.progress.lock().unwrap();
-        assert_eq!(progress.label, "Uploading dir");
+        assert_eq!(progress.label, "Uploading folder");
         assert_eq!(progress.file_name, "mydir");
         drop(progress);
         if let Some(jh) = handle.join_handle {
@@ -655,11 +628,101 @@ mod tests {
             },
         );
         let progress = handle.progress.lock().unwrap();
-        assert_eq!(progress.label, "Downloading dir");
+        assert_eq!(progress.label, "Downloading folder");
         assert_eq!(progress.file_name, "mydir");
         drop(progress);
         if let Some(jh) = handle.join_handle {
             let _ = jh.join();
         }
+    }
+
+    struct FakeRemote {
+        directories: HashMap<String, Vec<FileEntry>>,
+        files: HashMap<String, Vec<u8>>,
+    }
+
+    impl RemoteDirectorySource for FakeRemote {
+        type File = Cursor<Vec<u8>>;
+
+        fn list_dir(&self, path: &str) -> Result<Vec<FileEntry>, String> {
+            self.directories
+                .get(path)
+                .cloned()
+                .ok_or_else(|| format!("missing remote directory '{path}'"))
+        }
+
+        fn open_file(&self, path: &str) -> Result<Self::File, String> {
+            self.files
+                .get(path)
+                .cloned()
+                .map(Cursor::new)
+                .ok_or_else(|| format!("missing remote file '{path}'"))
+        }
+    }
+
+    #[test]
+    fn downloads_complete_remote_folder_tree() {
+        let entry = |name: &str, is_dir: bool, size: u64| FileEntry {
+            name: name.into(),
+            is_dir,
+            is_symlink: false,
+            size,
+            modified: None,
+            permissions: None,
+        };
+        let remote = FakeRemote {
+            directories: HashMap::from([
+                (
+                    "/srv/project".into(),
+                    vec![
+                        entry("nested", true, 0),
+                        entry("empty", true, 0),
+                        entry("root.txt", false, 4),
+                    ],
+                ),
+                (
+                    "/srv/project/nested".into(),
+                    vec![entry("data.bin", false, 5)],
+                ),
+                ("/srv/project/empty".into(), Vec::new()),
+            ]),
+            files: HashMap::from([
+                ("/srv/project/root.txt".into(), b"root".to_vec()),
+                ("/srv/project/nested/data.bin".into(), b"bytes".to_vec()),
+            ]),
+        };
+        let destination = tempfile::tempdir().unwrap();
+        let local_root = destination.path().join("project");
+        std::fs::create_dir_all(local_root.join("nested")).unwrap();
+        std::fs::write(local_root.join("nested/data.bin"), b"old").unwrap();
+        std::fs::write(local_root.join("keep-local.txt"), b"keep").unwrap();
+
+        let total = remote_dir_total_bytes(&remote, "/srv/project").unwrap();
+        let progress = Arc::new(Mutex::new(TransferProgress {
+            file_name: "project".into(),
+            label: "Downloading folder".into(),
+            bytes_transferred: 0,
+            total_bytes: total,
+            status: TransferStatus::InProgress,
+        }));
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        download_dir_inner(&remote, "/srv/project", &local_root, &progress, &cancel).unwrap();
+
+        assert_eq!(std::fs::read(local_root.join("root.txt")).unwrap(), b"root");
+        assert_eq!(
+            std::fs::read(local_root.join("nested/data.bin")).unwrap(),
+            b"bytes"
+        );
+        assert!(local_root.join("empty").is_dir());
+        assert_eq!(
+            std::fs::read(local_root.join("keep-local.txt")).unwrap(),
+            b"keep"
+        );
+        let progress = progress
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(progress.bytes_transferred, 9);
+        assert_eq!(progress.total_bytes, 9);
     }
 }

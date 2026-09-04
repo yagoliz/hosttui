@@ -79,7 +79,7 @@ Press `f` in the hosts view (or `Ctrl+T f` in a session) to open a dual-pane SFT
 | `Tab` | Switch focus between Local and Remote pane |
 | `Enter` | Enter directory / initiate transfer if file |
 | `Backspace` / `h` | Go to parent directory |
-| `y` | Transfer focused file to the other pane |
+| `y` | Transfer the focused file or folder to the other pane |
 | `m` | Create directory |
 | `d` | Delete file or directory (with confirmation) |
 | `r` | Refresh both pane listings |
@@ -87,7 +87,7 @@ Press `f` in the hosts view (or `Ctrl+T f` in a session) to open a dual-pane SFT
 | `s` | Cycle sort field (Name → Size → Modified) |
 | `Esc` | Close file transfer tab |
 
-Transfers run in the background. A progress bar at the bottom of the view shows status while a transfer is active.
+Transfers run in the background. Folder transfers recurse through the complete directory tree, including empty folders. A progress bar at the bottom of the view shows status while a transfer is active.
 
 ### Form navigation
 
